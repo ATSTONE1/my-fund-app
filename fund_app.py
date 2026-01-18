@@ -118,8 +118,16 @@ def plot_chart(df, days, title="布林带趋势分析", subtitle=None, enable_in
 
     # 定义交互选择器 (Crosshair 核心)
     # nearest=True 表示选择最近的数据点
-    # on='mouseover' 对应鼠标悬停或手指触摸移动
-    nearest = alt.selection_point(nearest=True, on='mouseover', fields=['date'], clear='mouseout')
+    # on='mouseover' 对应鼠标悬停
+    # 增加 mousemove touchmove 以支持移动端滑动查数
+    # empty=False 确保未交互时不显示任何辅助线
+    nearest = alt.selection_point(
+        nearest=True, 
+        on='mouseover mousemove touchmove', 
+        fields=['date'], 
+        clear='mouseout',
+        empty=False
+    )
 
     # 基础图表对象
     base = alt.Chart(plot_data).encode(
@@ -171,8 +179,8 @@ def plot_chart(df, days, title="布林带趋势分析", subtitle=None, enable_in
     )
 
     # 选中点的圆点高亮
-    points = line_val.mark_point(filled=True, size=50, color='black').encode(
-        opacity=alt.condition(nearest, alt.value(1), alt.value(0))
+    points = line_val.mark_point(filled=True, size=50, color='black').transform_filter(
+        nearest
     )
 
     # 组合图表
