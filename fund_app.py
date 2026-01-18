@@ -83,10 +83,17 @@ def get_data(code):
 
         # 2. 历史净值
         hist_df = ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势")
+        
+        # --- 数据清洗加强版 (防止列名不一致或乱码) ---
+        # 强制重命名列 (假设前三列顺序固定：日期, 单位净值, 日增长率)
+        if len(hist_df.columns) >= 2:
+            hist_df.columns = ['净值日期', '单位净值', '日增长率'] + list(hist_df.columns[3:])
+        
         hist_df['净值日期'] = pd.to_datetime(hist_df['净值日期'])
         hist_df = hist_df.sort_values('净值日期')
-        hist_df['单位净值'] = hist_df['单位净值'].astype(float)
-
+        hist_df['单位净值'] = pd.to_numeric(hist_df['单位净值'], errors='coerce') # 强制转数字
+        hist_df = hist_df.dropna(subset=['单位净值']) # 去除空值
+        
         # 3. 计算布林带
         window = 20
         k = 2
