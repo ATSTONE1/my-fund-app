@@ -107,36 +107,82 @@ def display_realtime_metrics(realtime_info, hist_df):
     # 准备显示数据
     fund_name = realtime_info['基金名称'] if realtime_info else "未知基金"
     
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric(label="基金名称", value=fund_name)
-    
-    with col2:
-        if realtime_info:
-            # 动态获取列名
-            est_val_col = [c for c in realtime_info.keys() if '估算值' in c][0]
-            est_rate_col = [c for c in realtime_info.keys() if '估算增长率' in c][0]
-            val = float(realtime_info[est_val_col])
-            rate = realtime_info[est_rate_col]
-            st.metric(label="实时估值 (GZ)", value=val, delta=f"{rate}%")
-        else:
-            st.metric(label="最新净值 (JZ)", value=f"{latest_hist['单位净值']:.4f}", delta="无实时数据")
-
-    with col3:
-        # 状态判断
-        curr_price = float(realtime_info[[c for c in realtime_info.keys() if '估算值' in c][0]]) if realtime_info else latest_hist['单位净值']
-        status = "正常持仓"
-        color = "normal"
+    # 获取实时估值或最新净值
+    if realtime_info:
+        est_val_col = [c for c in realtime_info.keys() if '估算值' in c][0]
+        est_rate_col = [c for c in realtime_info.keys() if '估算增长率' in c][0]
+        est_time_col = [c for c in realtime_info.keys() if '估算时间' in c][0] if any('估算时间' in c for c in realtime_info.keys()) else None
         
-        if curr_price > latest_hist['UB']:
-            status = "⚠️ 高估 (卖出信号)"
-            color = "inverse"
-        elif curr_price < latest_hist['LB']:
-            status = "💎 低估 (买入信号)"
-            color = "normal"
-            
-        st.metric(label="当前状态", value=status)
+        curr_price = float(realtime_info[est_val_col])
+        curr_rate = realtime_info[est_rate_col]
+        curr_time = realtime_info[est_time_col] if est_time_col else "实时"
+    else:
+        curr_price = latest_hist['单位净值']
+        curr_rate = "0.00"
+        curr_time = latest_hist['净值日期'].strftime('%Y-%m-%d')
+
+    # 计算技术指标
+    ub = latest_hist['UB']
+    lb = latest_hist['LB']
+    mb = latest_hist['MB']
+    
+    # 位置百分比 (0=LB, 50=MB, 100=UB)
+    if (ub - lb) != 0:
+        position_pct = (curr_price - lb) / (ub - lb) * 100
+    else:
+        position_pct = 50.0
+
+    # 状态判断
+    if curr_price > ub:
+        status = "⚠️ 严重高估 (卖出)"
+        status_color = "red"
+    elif curr_price > mb + (ub-mb)*0.8:
+        status = "⚠️ 偏高 (风险区)"
+        status_color = "orange"
+    elif curr_price < lb:
+        status = "💎 严重低估 (抄底)"
+        status_color = "green"
+    elif curr_price < lb + (mb-lb)*0.2:
+        status = "💎 偏低 (机会区)"
+        status_color = "lightgreen"
+    else:
+        status = "⚖️ 正常持有"
+        status_color = "gray"
+
+    # --- 布局展示 ---
+    
+    # 第一行：核心信息
+    st.markdown(f"### 📊 {fund_name} ({fund_code})")
+    
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric("当前价格", f"{curr_price:.4f}", f"{curr_rate}%")
+    with c2:
+        st.metric("更新时间", curr_time.split(' ')[-1] if ' ' in str(curr_time) else str(curr_time))
+    with c3:
+        st.metric("操作建议", status)
+    with c4:
+        st.metric("布林带位置", f"{position_pct:.1f}%", help="0%为下轨，100%为上轨，超过100%为突破上轨")
+
+    # 第二行：技术位详情
+    st.markdown("#### 🎯 今日关键点位")
+    k1, k2, k3, k4 = st.columns(4)
+    
+    # 计算距离
+    dist_ub = (ub - curr_price) / curr_price * 100
+    dist_lb = (curr_price - lb) / curr_price * 100
+    
+    with k1:
+        st.metric("上轨 (压力)", f"{ub:.4f}", f"距现价 {dist_ub:.2f}%")
+    with k2:
+        st.metric("中轨 (趋势)", f"{mb:.4f}")
+    with k3:
+        st.metric("下轨 (支撑)", f"{lb:.4f}", f"距现价 {-dist_lb:.2f}%")
+    with k4:
+        width = (ub - lb) / mb * 100
+        st.metric("通道带宽", f"{width:.2f}%", help="带宽越窄说明即将变盘，越宽说明波动剧烈")
+
+    st.divider()
 
 # Plotly绘图函数
 def plot_bollinger_plotly(df, days):
