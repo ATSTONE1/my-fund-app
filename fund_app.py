@@ -108,7 +108,7 @@ def get_fund_data_v2(code):
 # ==========================================
 # 3. 绘图函数 (Altair 版)
 # ==========================================
-def plot_chart(df, days):
+def plot_chart(df, days, title="布林带趋势分析", subtitle=None):
     # 截取最近 N 天
     plot_data = df.tail(days).copy()
     
@@ -150,7 +150,15 @@ def plot_chart(df, days):
 
     # 组合图表
     chart = (band + line_ub + line_lb + line_mb + line_val).properties(
-        title='布林带趋势分析',
+        title=alt.TitleParams(
+            text=title,
+            subtitle=subtitle if subtitle else [],
+            fontSize=20,
+            subtitleFontSize=14,
+            subtitleColor="gray",
+            anchor='start',
+            offset=20
+        ),
         height=400
     )
     
@@ -303,7 +311,15 @@ def main():
     # 图表
     if "UB" in df.columns:
         st.caption("💡 提示：点击图表右上角的 **...** 按钮，选择 **Save as PNG** 即可下载高清趋势图")
-        chart = plot_chart(df, days)
+        
+        # 构建图表标题信息
+        chart_title = f"基金 {code} 趋势分析 ({days}天)"
+        chart_subtitle = [
+            f"最新: {curr_val:.4f} ({curr_rate}) | {curr_date}",
+            f"建议: {signal_text} | 区间涨跌: {period_change:.2f}% | 最大回撤: {max_drawdown:.2f}%"
+        ]
+        
+        chart = plot_chart(df, days, title=chart_title, subtitle=chart_subtitle)
         if chart:
             st.altair_chart(chart, use_container_width=True)
     else:
