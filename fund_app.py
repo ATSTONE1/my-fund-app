@@ -1,7 +1,7 @@
 import streamlit as st
 import akshare as ak
 import pandas as pd
-import plotly.graph_objects as go
+import altair as alt
 from datetime import datetime
 
 # ==========================================
@@ -62,6 +62,7 @@ def get_fund_data_v2(code):
         # 清洗无效行
         df = df.dropna(subset=["date", "value"])
         df = df.sort_values("date")
+        df = df.reset_index(drop=True)
         
         # --- 这里的逻辑：如果单位净值全是 0,1,2 这种整数序列，说明数据源确实错了 ---
         # 但我们先不做自动修正，直接展示，由用户看调试面板
@@ -92,64 +93,55 @@ def get_fund_data_v2(code):
     return history_df, realtime_data, error_msg
 
 # ==========================================
-# 3. 绘图函数
+# 3. 绘图函数 (Altair 版)
 # ==========================================
 def plot_chart(df, days):
     # 截取最近 N 天
-    plot_data = df.tail(days)
+    plot_data = df.tail(days).copy()
     
     if plot_data.empty:
         st.warning("没有足够的数据用于绘图")
         return None
 
-    fig = go.Figure()
+    # 基础图表对象
+    base = alt.Chart(plot_data).encode(
+        x=alt.X('date:T', title='日期')
+    )
 
-    # 1. 绘制通道区域 (UB 和 LB 之间)
-    # Plotly 技巧：先画 LB，再画 UB 并填充到 LB
-    fig.add_trace(go.Scatter(
-        x=plot_data["date"], y=plot_data["LB"],
-        mode="lines", line=dict(width=0), showlegend=False, hoverinfo="skip"
-    ))
-    
-    fig.add_trace(go.Scatter(
-        x=plot_data["date"], y=plot_data["UB"],
-        mode="lines", line=dict(width=0),
-        fill="tonexty", fillcolor="rgba(200, 200, 200, 0.2)", # 浅灰色填充
-        showlegend=False, hoverinfo="skip"
-    ))
+    # 1. 布林带区域 (UB 和 LB 之间)
+    band = base.mark_area(opacity=0.3, color='#C0C0C0').encode(
+        y='LB:Q',
+        y2='UB:Q'
+    )
 
-    # 2. 绘制线条
-    fig.add_trace(go.Scatter(
-        x=plot_data["date"], y=plot_data["UB"],
-        mode="lines", name="上轨 (压力)", line=dict(color="green", dash="dash", width=1)
-    ))
-    
-    fig.add_trace(go.Scatter(
-        x=plot_data["date"], y=plot_data["LB"],
-        mode="lines", name="下轨 (支撑)", line=dict(color="red", dash="dash", width=1)
-    ))
-    
-    fig.add_trace(go.Scatter(
-        x=plot_data["date"], y=plot_data["MB"],
-        mode="lines", name="中轨 (趋势)", line=dict(color="gray", dash="dot", width=1)
-    ))
-    
-    fig.add_trace(go.Scatter(
-        x=plot_data["date"], y=plot_data["value"],
-        mode="lines", name="单位净值", line=dict(color="black", width=2)
-    ))
-
-    # 3. 布局设置
-    fig.update_layout(
-        title="布林带趋势分析",
-        xaxis_title="日期",
-        yaxis_title="单位净值",
-        hovermode="x unified",
-        margin=dict(l=20, r=20, t=40, b=20),
-        legend=dict(orientation="h", y=1.02, x=1, xanchor="right", yanchor="bottom")
+    # 2. 线条
+    # 净值线
+    line_val = base.mark_line(color='black', strokeWidth=2).encode(
+        y=alt.Y('value:Q', title='单位净值', scale=alt.Scale(zero=False)),
+        tooltip=[
+            alt.Tooltip('date', title='日期', format='%Y-%m-%d'),
+            alt.Tooltip('value', title='单位净值'),
+            alt.Tooltip('UB', title='上轨', format='.4f'),
+            alt.Tooltip('LB', title='下轨', format='.4f')
+        ]
     )
     
-    return fig
+    # 上轨 (虚线)
+    line_ub = base.mark_line(color='green', strokeDash=[5, 5], opacity=0.7).encode(y='UB:Q')
+    
+    # 下轨 (虚线)
+    line_lb = base.mark_line(color='red', strokeDash=[5, 5], opacity=0.7).encode(y='LB:Q')
+    
+    # 中轨 (点线)
+    line_mb = base.mark_line(color='gray', strokeDash=[2, 2], opacity=0.5).encode(y='MB:Q')
+
+    # 组合图表
+    chart = (band + line_ub + line_lb + line_mb + line_val).properties(
+        title='布林带趋势分析',
+        height=400
+    ).interactive() # 开启交互 (缩放、平移)
+    
+    return chart
 
 # ==========================================
 # 4. 主程序
@@ -228,19 +220,22 @@ def main():
 
     # 图表
     if "UB" in df.columns:
-        fig = plot_chart(df, days)
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
+        chart = plot_chart(df, days)
+        if chart:
+            st.altair_chart(chart, use_container_width=True)
     else:
         st.warning("数据不足，无法计算布林带 (至少需要20天数据)")
 
     # 原始数据查看 (放在折叠栏里，方便查错)
-    with st.expander("📋 查看原始数据 & 调试"):
+    with st.expander("📋 查看原始数据 & 调试", expanded=True):
         st.write(f"数据总行数: {len(df)}")
-        st.write("前5行数据:")
+        
+        st.write("### 数据预览 (文本模式)")
+        st.code(df.head().to_string(), language="text")
+        st.code(df.tail().to_string(), language="text")
+
+        st.write("### 数据预览 (表格模式)")
         st.dataframe(df.head())
-        st.write("后5行数据:")
-        st.dataframe(df.tail())
         
         # 下载
         csv = df.to_csv(index=False).encode('utf-8-sig')
