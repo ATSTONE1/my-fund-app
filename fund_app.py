@@ -190,26 +190,45 @@ def plot_bollinger_plotly(df, days):
     
     fig = go.Figure()
 
-    # 1. 绘制轨道区域 (UB和LB之间)
+    # 1. 绘制下轨 (作为填充基准)
     fig.add_trace(go.Scatter(
-        x=pd.concat([plot_data['净值日期'], plot_data['净值日期'][::-1]]),
-        y=pd.concat([plot_data['UB'], plot_data['LB'][::-1]]),
-        fill='toself',
-        fillcolor='rgba(128,128,128,0.1)',
-        line=dict(color='rgba(255,255,255,0)'),
-        hoverinfo="skip",
-        name='布林带通道'
+        x=plot_data['净值日期'], 
+        y=plot_data['LB'], 
+        mode='lines', 
+        name='下轨 (支撑)', 
+        line=dict(color='red', dash='dash', width=1)
     ))
 
-    # 2. 绘制三条线
-    fig.add_trace(go.Scatter(x=plot_data['净值日期'], y=plot_data['UB'], mode='lines', name='上轨 (阻力)', line=dict(color='green', dash='dash', width=1)))
-    fig.add_trace(go.Scatter(x=plot_data['净值日期'], y=plot_data['MB'], mode='lines', name='中轨 (趋势)', line=dict(color='gray', dash='dot', width=1)))
-    fig.add_trace(go.Scatter(x=plot_data['净值日期'], y=plot_data['LB'], mode='lines', name='下轨 (支撑)', line=dict(color='red', dash='dash', width=1)))
+    # 2. 绘制上轨 (填充到下轨)
+    fig.add_trace(go.Scatter(
+        x=plot_data['净值日期'], 
+        y=plot_data['UB'], 
+        mode='lines', 
+        name='上轨 (阻力)', 
+        line=dict(color='green', dash='dash', width=1),
+        fill='tonexty', # 关键修改：使用 tonexty 填充到上一条线(下轨)
+        fillcolor='rgba(128,128,128,0.1)'
+    ))
 
-    # 3. 绘制净值线
-    fig.add_trace(go.Scatter(x=plot_data['净值日期'], y=plot_data['单位净值'], mode='lines', name='单位净值', line=dict(color='black', width=2)))
+    # 3. 绘制中轨
+    fig.add_trace(go.Scatter(
+        x=plot_data['净值日期'], 
+        y=plot_data['MB'], 
+        mode='lines', 
+        name='中轨 (趋势)', 
+        line=dict(color='gray', dash='dot', width=1)
+    ))
 
-    # 4. 标记买卖点
+    # 4. 绘制净值线
+    fig.add_trace(go.Scatter(
+        x=plot_data['净值日期'], 
+        y=plot_data['单位净值'], 
+        mode='lines', 
+        name='单位净值', 
+        line=dict(color='black', width=2)
+    ))
+
+    # 5. 标记买卖点
     high_points = plot_data[plot_data['单位净值'] > plot_data['UB']]
     low_points = plot_data[plot_data['单位净值'] < plot_data['LB']]
 
@@ -231,7 +250,7 @@ def plot_bollinger_plotly(df, days):
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         xaxis_title="日期",
         yaxis_title="净值",
-        dragmode="pan" # 适合手机
+        dragmode="pan"
     )
     
     return fig
