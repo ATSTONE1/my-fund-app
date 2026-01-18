@@ -230,7 +230,10 @@ def main():
             k_rate = next((k for k in rt_data.keys() if "估算增长率" in k), None)
             
             if k_val: curr_val = float(rt_data[k_val])
-            if k_rate: curr_rate = f"{rt_data[k_rate]}%"
+            if k_rate: 
+                # 修复可能重复的百分号
+                raw_rate = str(rt_data[k_rate]).replace("%", "")
+                curr_rate = f"{raw_rate}%"
             curr_date = "实时估算"
         except:
             pass
@@ -299,6 +302,7 @@ def main():
 
     # 图表
     if "UB" in df.columns:
+        st.caption("💡 提示：点击图表右上角的 **...** 按钮，选择 **Save as PNG** 即可下载高清趋势图")
         chart = plot_chart(df, days)
         if chart:
             st.altair_chart(chart, use_container_width=True)
