@@ -239,22 +239,63 @@ def main():
     ub = latest["UB"] if "UB" in df.columns else 0
     lb = latest["LB"] if "LB" in df.columns else 0
     
-    status = "持有"
-    color = "off"
-    if ub > 0 and lb > 0:
-        if curr_val > ub:
-            status = "高估 (卖出信号)"
-            color = "inverse" # Streamlit metric doesn't support color directly, but we use delta
-        elif curr_val < lb:
-            status = "低估 (买入信号)"
-            color = "normal"
+    # --- 扩展指标计算 ---
+    # 1. 区间涨跌幅 (基于显示天数)
+    period_df = df.tail(days)
+    if not period_df.empty:
+        start_val = period_df.iloc[0]["value"]
+        end_val = period_df.iloc[-1]["value"]
+        period_change = (end_val - start_val) / start_val * 100
+    else:
+        period_change = 0
 
-    # 指标栏
+    # 2. 最大回撤
+    # 计算公式：(当前值 - 之前最高值) / 之前最高值
+    roll_max = period_df["value"].cummax()
+    drawdown = (period_df["value"] - roll_max) / roll_max
+    max_drawdown = drawdown.min() * 100
+
+    # 3. 布林带位置 (%B)
+    # 0=下轨, 1=上轨, >1=突破上轨, <0=跌破下轨
+    if ub != lb:
+        pct_b = (curr_val - lb) / (ub - lb)
+    else:
+        pct_b = 0.5
+
+    # 指标栏 - 第一行 (基础信息)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("当前净值/估值", f"{curr_val:.4f}", curr_rate)
     c2.metric("更新时间", curr_date)
     c3.metric("布林上轨 (阻力)", f"{ub:.4f}" if ub else "-")
     c4.metric("布林下轨 (支撑)", f"{lb:.4f}" if lb else "-")
+
+    # 指标栏 - 第二行 (进阶分析)
+    st.markdown("---") # 分割线
+    k1, k2, k3, k4 = st.columns(4)
+    
+    k1.metric(f"近{len(period_df)}天涨跌", f"{period_change:.2f}%", 
+              delta_color="normal" if period_change > 0 else "inverse")
+    
+    k2.metric("区间最大回撤", f"{max_drawdown:.2f}%", 
+              delta_color="off") # 回撤通常是负数，用灰色或红色表示风险
+              
+    k3.metric("相对位置 (%B)", f"{pct_b:.2f}", 
+              help=">1: 突破上轨 (超买); <0: 跌破下轨 (超卖)")
+    
+    # 信号状态
+    signal_color = "gray"
+    if curr_val > ub:
+        signal_text = "🚫 卖出信号 (高估)"
+        signal_color = "red"
+    elif curr_val < lb:
+        signal_text = "✅ 买入信号 (低估)"
+        signal_color = "green"
+    else:
+        signal_text = "☕ 持有观望"
+        signal_color = "blue"
+        
+    k4.markdown(f"**操作建议**:<br><span style='color:{signal_color};font-size:1.2em;font-weight:bold'>{signal_text}</span>", unsafe_allow_html=True)
+    st.markdown("---") # 分割线
 
     # 图表
     if "UB" in df.columns:
@@ -289,16 +330,13 @@ def main():
         }
     )
 
-    with st.expander("🛠️ 调试信息 (如果数据有问题点这里)"):
-        st.write(f"数据总行数: {len(df)}")
-        
-        st.write("### 数据预览 (文本模式)")
-        st.code(df.head().to_string(), language="text")
-        st.code(df.tail().to_string(), language="text")
-        
-        # 下载
-        csv = df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("下载数据 CSV", csv, f"fund_{code}.csv", "text/csv")
+    # 下载
+    csv = df.to_csv(index=False).encode('utf-8-sig')
+    st.download_button("📥 下载完整数据 (CSV)", csv, f"fund_{code}.csv", "text/csv", use_container_width=True)
+
+    # 调试信息 (已移除，如需恢复请取消注释)
+    # with st.expander("🛠️ 调试信息"):
+    #    ...
 
 if __name__ == "__main__":
     main()
