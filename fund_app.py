@@ -36,6 +36,21 @@ def main():
         st.error(error_msg)
         return
 
+    # --- 调试模式：显示原始数据 ---
+    # 仅当数据看起来异常时（比如净值是整数序列），或者用户手动展开时显示
+    is_abnormal = False
+    if hist_data is not None and not hist_data.empty:
+        # 简单判断：如果单位净值是整数且连续，很可能是读成索引了
+        vals = hist_data['单位净值'].head(10).tolist()
+        if all(isinstance(x, (int, float)) and x == int(x) for x in vals):
+            is_abnormal = True
+    
+    with st.expander("🔧 数据调试面板 (如果图表是一条直线，请点开截图发给我)", expanded=is_abnormal):
+        st.write("程序读取到的前5行数据：")
+        st.write(hist_data.head() if hist_data is not None else "无数据")
+        st.write("数据列名：", hist_data.columns.tolist() if hist_data is not None else "无")
+    # ---------------------------
+
     # 1. 实时数据展示
     display_realtime_metrics(realtime_data, hist_data)
 
@@ -84,10 +99,38 @@ def get_data(code):
         # 2. 历史净值
         hist_df = ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势")
         
+        # --- 强力修复逻辑 ---
+        # 如果列名不对，尝试按位置重命名
+        if '单位净值' not in hist_df.columns and len(hist_df.columns) >= 2:
+            hist_df.columns = ['净值日期', '单位净值'] + list(hist_df.columns[2:])
+            
         # 3. 数据处理
         hist_df['净值日期'] = pd.to_datetime(hist_df['净值日期'])
         hist_df = hist_df.sort_values('净值日期')
-        hist_df['单位净值'] = pd.to_numeric(hist_df['单位净值'], errors='coerce') # 强制转数字
+        
+        # 再次检查：如果单位净值列全是整数（可能是索引），尝试找真正的浮点数列
+        try:
+             # 先尝试转数字
+            hist_df['单位净值'] = pd.to_numeric(hist_df['单位净值'], errors='coerce')
+            
+            # 检查前10行是否都是整数
+            head_vals = hist_df['单位净值'].head(10).dropna()
+            if len(head_vals) > 0 and all(x == int(x) for x in head_vals):
+                # 可能是索引，尝试寻找真正的净值列（通常是浮点数，且不是第一列）
+                for col in hist_df.columns:
+                    if col in ['净值日期', '单位净值']: continue
+                    
+                    # 尝试转换这一列
+                    temp_series = pd.to_numeric(hist_df[col], errors='coerce')
+                    temp_head = temp_series.head(10).dropna()
+                    
+                    # 如果这列是浮点数（包含小数），那它才是真正的净值
+                    if len(temp_head) > 0 and any(x != int(x) for x in temp_head):
+                        hist_df['单位净值'] = temp_series
+                        break
+        except:
+            pass
+            
         hist_df = hist_df.dropna(subset=['单位净值']) # 去除空值
         
         # 4. 计算布林带
