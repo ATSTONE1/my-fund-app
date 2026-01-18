@@ -187,24 +187,27 @@ def plot_chart(df, days, title="布林带趋势分析", subtitle=None):
         )
         chart = chart + sell_layer
 
-    return chart.interactive()
+    # 移动端优化：仅允许 X 轴缩放/平移，防止与页面滚动冲突
+    return chart.interactive(bind_y=False)
 
 # ==========================================
 # 4. 主程序
 # ==========================================
 def main():
-    # 侧边栏
-    with st.sidebar:
-        st.header("设置")
-        code = st.text_input("基金代码", value="017057", max_chars=6)
-        days = st.slider("显示天数", 30, 365, 120)
+    # 标题
+    st.title("📊 基金分析看板")
+
+    # 移动端优化：将设置移至顶部折叠面板，方便手机操作
+    with st.expander("⚙️ 参数设置", expanded=True):
+        c_set1, c_set2 = st.columns([2, 1])
+        with c_set1:
+            code = st.text_input("基金代码", value="017057", max_chars=6, help="输入6位数字代码")
+        with c_set2:
+            days = st.slider("天数", 30, 365, 120)
         
-        if st.button("清除缓存"):
+        if st.button("🔄 刷新 / 清除缓存", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
-
-    # 标题
-    st.title(f"📊 基金分析看板 ({code})")
 
     if len(code) != 6:
         st.warning("请输入6位基金代码")
@@ -274,38 +277,42 @@ def main():
         pct_b = 0.5
 
     # 指标栏 - 第一行 (基础信息)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("当前净值/估值", f"{curr_val:.4f}", curr_rate)
-    c2.metric("更新时间", curr_date)
-    c3.metric("布林上轨 (阻力)", f"{ub:.4f}" if ub else "-")
-    c4.metric("布林下轨 (支撑)", f"{lb:.4f}" if lb else "-")
+    # 移动端优化：使用 2x2 布局代替 1x4，防止手机上挤压
+    m1, m2 = st.columns(2)
+    with m1:
+        st.metric("当前净值/估值", f"{curr_val:.4f}", curr_rate)
+        st.metric("更新时间", curr_date)
+    with m2:
+        st.metric("布林上轨 (阻力)", f"{ub:.4f}" if ub else "-")
+        st.metric("布林下轨 (支撑)", f"{lb:.4f}" if lb else "-")
 
     # 指标栏 - 第二行 (进阶分析)
     st.markdown("---") # 分割线
-    k1, k2, k3, k4 = st.columns(4)
     
-    k1.metric(f"近{len(period_df)}天涨跌", f"{period_change:.2f}%", 
-              delta_color="normal" if period_change > 0 else "inverse")
-    
-    k2.metric("区间最大回撤", f"{max_drawdown:.2f}%", 
-              delta_color="off") # 回撤通常是负数，用灰色或红色表示风险
-              
-    k3.metric("相对位置 (%B)", f"{pct_b:.2f}", 
-              help=">1: 突破上轨 (超买); <0: 跌破下轨 (超卖)")
-    
-    # 信号状态
-    signal_color = "gray"
-    if curr_val > ub:
-        signal_text = "🚫 卖出信号 (高估)"
-        signal_color = "red"
-    elif curr_val < lb:
-        signal_text = "✅ 买入信号 (低估)"
-        signal_color = "green"
-    else:
-        signal_text = "☕ 持有观望"
-        signal_color = "blue"
+    k1, k2 = st.columns(2)
+    with k1:
+        st.metric(f"近{len(period_df)}天涨跌", f"{period_change:.2f}%", 
+                  delta_color="normal" if period_change > 0 else "inverse")
+        st.metric("区间最大回撤", f"{max_drawdown:.2f}%", 
+                  delta_color="off")
+    with k2:
+        st.metric("相对位置 (%B)", f"{pct_b:.2f}", 
+                  help=">1: 突破上轨 (超买); <0: 跌破下轨 (超卖)")
         
-    k4.markdown(f"**操作建议**:<br><span style='color:{signal_color};font-size:1.2em;font-weight:bold'>{signal_text}</span>", unsafe_allow_html=True)
+        # 信号状态
+        signal_color = "gray"
+        if curr_val > ub:
+            signal_text = "🚫 卖出"
+            signal_color = "red"
+        elif curr_val < lb:
+            signal_text = "✅ 买入"
+            signal_color = "green"
+        else:
+            signal_text = "☕ 持有"
+            signal_color = "blue"
+            
+        st.markdown(f"**操作建议**:<br><span style='color:{signal_color};font-size:1.2em;font-weight:bold'>{signal_text}</span>", unsafe_allow_html=True)
+    
     st.markdown("---") # 分割线
 
     # 图表
@@ -326,33 +333,33 @@ def main():
         st.warning("数据不足，无法计算布林带 (至少需要20天数据)")
 
     # 原始数据查看 (放在折叠栏里，方便查错)
-    st.subheader("📋 历史数据明细")
-    
-    # 格式化一下显示的 DataFrame
-    display_df = df.copy()
-    display_df['date'] = display_df['date'].dt.strftime('%Y-%m-%d')
-    # 只保留主要列，并按日期倒序
-    cols = ['date', 'value', '信号', 'UB', 'LB', 'MB', '日增长率']
-    # 过滤掉不存在的列
-    cols = [c for c in cols if c in display_df.columns]
-    
-    st.dataframe(
-        display_df[cols].sort_values('date', ascending=False),
-        use_container_width=True,
-        column_config={
-            "date": "日期",
-            "value": "单位净值",
-            "信号": st.column_config.TextColumn("操作信号", help="基于布林带策略的建议"),
-            "UB": st.column_config.NumberColumn("阻力位 (上轨)", format="%.4f"),
-            "LB": st.column_config.NumberColumn("支撑位 (下轨)", format="%.4f"),
-            "MB": st.column_config.NumberColumn("趋势位 (中轨)", format="%.4f"),
-            "日增长率": "日涨幅(%)"
-        }
-    )
+    # 移动端优化：默认不展开，避免占用过多垂直空间
+    with st.expander("📋 历史数据明细", expanded=False):
+        # 格式化一下显示的 DataFrame
+        display_df = df.copy()
+        display_df['date'] = display_df['date'].dt.strftime('%Y-%m-%d')
+        # 只保留主要列，并按日期倒序
+        cols = ['date', 'value', '信号', 'UB', 'LB', 'MB', '日增长率']
+        # 过滤掉不存在的列
+        cols = [c for c in cols if c in display_df.columns]
+        
+        st.dataframe(
+            display_df[cols].sort_values('date', ascending=False),
+            use_container_width=True,
+            column_config={
+                "date": "日期",
+                "value": "单位净值",
+                "信号": st.column_config.TextColumn("操作信号", help="基于布林带策略的建议"),
+                "UB": st.column_config.NumberColumn("阻力位 (上轨)", format="%.4f"),
+                "LB": st.column_config.NumberColumn("支撑位 (下轨)", format="%.4f"),
+                "MB": st.column_config.NumberColumn("趋势位 (中轨)", format="%.4f"),
+                "日增长率": "日涨幅(%)"
+            }
+        )
 
-    # 下载
-    csv = df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("📥 下载完整数据 (CSV)", csv, f"fund_{code}.csv", "text/csv", use_container_width=True)
+        # 下载
+        csv = df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("📥 下载完整数据 (CSV)", csv, f"fund_{code}.csv", "text/csv", use_container_width=True)
 
     # 调试信息 (已移除，如需恢复请取消注释)
     # with st.expander("🛠️ 调试信息"):
