@@ -74,6 +74,19 @@ def get_fund_data_v2(code):
             df["STD"] = df["value"].rolling(window=20).std()
             df["UB"] = df["MB"] + 2 * df["STD"]
             df["LB"] = df["MB"] - 2 * df["STD"]
+            
+            # 计算信号
+            def get_signal(row):
+                if pd.isna(row['UB']) or pd.isna(row['LB']):
+                    return "数据不足"
+                if row['value'] > row['UB']:
+                    return "卖出"
+                elif row['value'] < row['LB']:
+                    return "买入"
+                else:
+                    return "持有"
+            
+            df["信号"] = df.apply(get_signal, axis=1)
         
         history_df = df
 
@@ -139,9 +152,34 @@ def plot_chart(df, days):
     chart = (band + line_ub + line_lb + line_mb + line_val).properties(
         title='布林带趋势分析',
         height=400
-    ).interactive() # 开启交互 (缩放、平移)
+    )
     
-    return chart
+    # 3. 买卖信号点 (新增)
+    # 筛选出有买卖信号的点
+    buy_points = plot_data[plot_data['信号'] == '买入']
+    sell_points = plot_data[plot_data['信号'] == '卖出']
+    
+    if not buy_points.empty:
+        buy_layer = alt.Chart(buy_points).mark_point(
+            shape='triangle-up', size=100, color='red', fill='red'
+        ).encode(
+            x='date:T',
+            y='value:Q',
+            tooltip=['date', 'value', '信号']
+        )
+        chart = chart + buy_layer
+        
+    if not sell_points.empty:
+        sell_layer = alt.Chart(sell_points).mark_point(
+            shape='triangle-down', size=100, color='green', fill='green'
+        ).encode(
+            x='date:T',
+            y='value:Q',
+            tooltip=['date', 'value', '信号']
+        )
+        chart = chart + sell_layer
+
+    return chart.interactive()
 
 # ==========================================
 # 4. 主程序
@@ -227,15 +265,36 @@ def main():
         st.warning("数据不足，无法计算布林带 (至少需要20天数据)")
 
     # 原始数据查看 (放在折叠栏里，方便查错)
-    with st.expander("📋 查看原始数据 & 调试", expanded=True):
+    st.subheader("📋 历史数据明细")
+    
+    # 格式化一下显示的 DataFrame
+    display_df = df.copy()
+    display_df['date'] = display_df['date'].dt.strftime('%Y-%m-%d')
+    # 只保留主要列，并按日期倒序
+    cols = ['date', 'value', '信号', 'UB', 'LB', 'MB', '日增长率']
+    # 过滤掉不存在的列
+    cols = [c for c in cols if c in display_df.columns]
+    
+    st.dataframe(
+        display_df[cols].sort_values('date', ascending=False),
+        use_container_width=True,
+        column_config={
+            "date": "日期",
+            "value": "单位净值",
+            "信号": st.column_config.TextColumn("操作信号", help="基于布林带策略的建议"),
+            "UB": st.column_config.NumberColumn("阻力位 (上轨)", format="%.4f"),
+            "LB": st.column_config.NumberColumn("支撑位 (下轨)", format="%.4f"),
+            "MB": st.column_config.NumberColumn("趋势位 (中轨)", format="%.4f"),
+            "日增长率": "日涨幅(%)"
+        }
+    )
+
+    with st.expander("🛠️ 调试信息 (如果数据有问题点这里)"):
         st.write(f"数据总行数: {len(df)}")
         
         st.write("### 数据预览 (文本模式)")
         st.code(df.head().to_string(), language="text")
         st.code(df.tail().to_string(), language="text")
-
-        st.write("### 数据预览 (表格模式)")
-        st.dataframe(df.head())
         
         # 下载
         csv = df.to_csv(index=False).encode('utf-8-sig')
