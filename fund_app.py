@@ -39,16 +39,36 @@ def main():
     # --- 调试模式：显示原始数据 ---
     # 仅当数据看起来异常时（比如净值是整数序列），或者用户手动展开时显示
     is_abnormal = False
+    stats_info = {}
     if hist_data is not None and not hist_data.empty:
-        # 简单判断：如果单位净值是整数且连续，很可能是读成索引了
-        vals = hist_data['单位净值'].head(10).tolist()
-        if all(isinstance(x, (int, float)) and x == int(x) for x in vals):
+        # 统计信息
+        vals = hist_data['单位净值']
+        stats_info = {
+            "Min": vals.min(),
+            "Max": vals.max(),
+            "Std": vals.std(),
+            "Count": len(vals),
+            "Last Date": hist_data['净值日期'].iloc[-1]
+        }
+        # 如果标准差极小，可能是直线
+        if vals.std() < 0.0001:
             is_abnormal = True
     
-    with st.expander("🔧 数据调试面板 (如果图表是一条直线，请点开截图发给我)", expanded=is_abnormal):
-        st.write("程序读取到的前5行数据：")
-        st.write(hist_data.head() if hist_data is not None else "无数据")
-        st.write("数据列名：", hist_data.columns.tolist() if hist_data is not None else "无")
+    with st.expander("🔧 数据调试面板 (如果图表异常请点开)", expanded=is_abnormal):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write("程序读取到的前5行数据：")
+            st.write(hist_data.head() if hist_data is not None else "无数据")
+            if hist_data is not None:
+                st.write("所有列的前5个值：")
+                for col in hist_data.columns:
+                    st.text(f"{col}: {hist_data[col].head(5).tolist()}")
+        with c2:
+            st.write("数据列名：", hist_data.columns.tolist() if hist_data is not None else "无")
+            st.write("统计信息：", stats_info)
+            if st.button("🗑️ 清除缓存并刷新"):
+                st.cache_data.clear()
+                st.rerun()
     # ---------------------------
 
     # 1. 实时数据展示
@@ -80,138 +100,6 @@ def main():
         )
 
 # 数据获取函数
-def _to_numeric_series(s: pd.Series) -> pd.Series:
-    if s is None:
-        return s
-    if s.dtype == object:
-        s = s.astype(str).str.replace("%", "", regex=False)
-    return pd.to_numeric(s, errors="coerce")
-
-
-def _is_index_like_series(s: pd.Series) -> bool:
-    if s is None:
-        return False
-    head = pd.Series(s).dropna().head(30)
-    if head.empty:
-        return False
-    if not all(float(x).is_integer() for x in head):
-        return False
-    diffs = head.diff().dropna()
-    if diffs.empty:
-        return False
-    if diffs.abs().median() != 1:
-        return False
-    if head.nunique() != len(head):
-        return False
-    return True
-
-
-def _normalize_hist_df(hist_df: pd.DataFrame) -> pd.DataFrame:
-    if hist_df is None or hist_df.empty:
-        return hist_df
-
-    hist_df = hist_df.copy()
-    hist_df.columns = [str(c).strip().replace("\ufeff", "") for c in hist_df.columns]
-
-    if "净值日期" not in hist_df.columns:
-        idx_as_dt = pd.to_datetime(hist_df.index, errors="coerce")
-        if idx_as_dt.notna().mean() >= 0.9:
-            hist_df = hist_df.reset_index().rename(columns={"index": "净值日期"})
-        else:
-            date_like_cols = [c for c in hist_df.columns if "日期" in c]
-            if date_like_cols:
-                hist_df = hist_df.rename(columns={date_like_cols[0]: "净值日期"})
-
-    if "净值日期" not in hist_df.columns:
-        raise ValueError("历史数据缺少日期列")
-
-    value_col = None
-    if "单位净值" in hist_df.columns:
-        value_col = "单位净值"
-    else:
-        unit_like = [c for c in hist_df.columns if "单位净值" in c]
-        if unit_like:
-            value_col = unit_like[0]
-
-    candidate_cols = [c for c in hist_df.columns if c != "净值日期"]
-    if value_col is None:
-        net_like = [c for c in candidate_cols if ("净值" in c and "累计" not in c)]
-        if net_like:
-            value_col = net_like[0]
-
-    for col in candidate_cols:
-        hist_df[col] = _to_numeric_series(hist_df[col])
-
-    if value_col is None:
-        best_col = None
-        best_score = -1e18
-        for col in candidate_cols:
-            ser = hist_df[col]
-            nonnull = ser.notna().mean()
-            if nonnull < 0.8:
-                continue
-
-            head = ser.dropna().head(60)
-            if head.empty:
-                continue
-
-            within_range = ((head > 0.05) & (head < 20)).mean()
-            decimal_ratio = (head.apply(lambda x: abs(x - round(x)) > 1e-6)).mean()
-            diffs = head.diff().abs().dropna()
-            median_diff = diffs.median() if not diffs.empty else 999.0
-
-            name_penalty = 0.0
-            if any(k in col for k in ["增长", "涨", "率", "回报", "收益"]):
-                name_penalty -= 0.8
-            if "累计" in col:
-                name_penalty -= 0.1
-
-            score = (
-                nonnull * 2.0
-                + within_range * 2.0
-                + decimal_ratio * 1.0
-                + (-min(median_diff, 2.0)) * 0.5
-                + name_penalty
-            )
-            if score > best_score:
-                best_score = score
-                best_col = col
-
-        if best_col is None:
-            raise ValueError("无法识别历史数据的净值列")
-        value_col = best_col
-
-    if value_col != "单位净值":
-        hist_df = hist_df.rename(columns={value_col: "单位净值"})
-
-    hist_df["净值日期"] = pd.to_datetime(hist_df["净值日期"], errors="coerce")
-    hist_df["单位净值"] = _to_numeric_series(hist_df["单位净值"])
-
-    if _is_index_like_series(hist_df["单位净值"]):
-        alt_cols = [c for c in candidate_cols if c != value_col]
-        best_col = None
-        best_score = -1e18
-        for col in alt_cols:
-            ser = hist_df[col]
-            head = ser.dropna().head(60)
-            if head.empty:
-                continue
-            if _is_index_like_series(head):
-                continue
-            within_range = ((head > 0.05) & (head < 20)).mean()
-            decimal_ratio = (head.apply(lambda x: abs(x - round(x)) > 1e-6)).mean()
-            score = within_range * 2.0 + decimal_ratio * 1.0 + ser.notna().mean()
-            if score > best_score:
-                best_score = score
-                best_col = col
-        if best_col is not None:
-            hist_df["单位净值"] = hist_df[best_col]
-
-    hist_df = hist_df.dropna(subset=["净值日期", "单位净值"])
-    hist_df = hist_df.sort_values("净值日期")
-    return hist_df
-
-
 @st.cache_data(ttl=300) # 缓存5分钟
 def get_data(code):
     realtime_info = None
@@ -230,18 +118,108 @@ def get_data(code):
 
         # 2. 历史净值
         hist_df = ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势")
-        hist_df = _normalize_hist_df(hist_df)
         
+        # --- 数据清洗 V2.0 (简化版) ---
+        # 既然 akshare 返回的数据通常是标准的，我们只做必要的防御性处理，避免过度清洗导致错误
+        
+        if hist_df is not None and not hist_df.empty:
+            # 1. 确保列名是字符串且无空格
+            hist_df.columns = [str(c).strip() for c in hist_df.columns]
+            
+            # 2. 确保有“净值日期”和“单位净值”列
+            if '净值日期' not in hist_df.columns:
+                # 尝试找带“日期”的列
+                date_cols = [c for c in hist_df.columns if '日期' in c]
+                if date_cols:
+                    hist_df = hist_df.rename(columns={date_cols[0]: '净值日期'})
+            
+            if '单位净值' not in hist_df.columns:
+                # 尝试找带“净值”且不带“累计”的列
+                val_cols = [c for c in hist_df.columns if '净值' in c and '累计' not in c]
+                if val_cols:
+                    hist_df = hist_df.rename(columns={val_cols[0]: '单位净值'})
+
+            # 3. 类型转换
+            if '净值日期' in hist_df.columns and '单位净值' in hist_df.columns:
+                hist_df['净值日期'] = pd.to_datetime(hist_df['净值日期'], errors='coerce')
+                hist_df['单位净值'] = pd.to_numeric(hist_df['单位净值'], errors='coerce')
+                
+                # --- 强力修复：检测是否读成了索引 (0, 1, 2...) ---
+                vals = hist_df['单位净值'].head(10).tolist()
+                is_index_col = True
+                if len(vals) > 5:
+                    # 检查是否接近整数且连续递增
+                    for i, v in enumerate(vals):
+                        try:
+                            if abs(float(v) - i) > 0.1: # 允许一点误差
+                                is_index_col = False
+                                break
+                        except:
+                            is_index_col = False
+                            break
+                else:
+                    is_index_col = False
+
+                if is_index_col:
+                    # 如果当前“单位净值”是索引，尝试从其他列找真正的净值
+                    candidate_cols = [c for c in hist_df.columns if c not in ['单位净值', '净值日期']]
+                    found_replacement = False
+                    for col in candidate_cols:
+                        try:
+                            # 尝试转数字
+                            temp_s = pd.to_numeric(hist_df[col], errors='coerce')
+                            temp_head = temp_s.head(10).dropna()
+                            if len(temp_head) < 5: continue
+                            
+                            # 检查这列是不是也是索引
+                            is_temp_index = True
+                            temp_vals = temp_head.tolist()
+                            for i, v in enumerate(temp_vals):
+                                if abs(v - i) > 0.1:
+                                    is_temp_index = False
+                                    break
+                            
+                            if not is_temp_index:
+                                # 找到了！这列看起来是真正的净值
+                                hist_df['单位净值'] = temp_s
+                                found_replacement = True
+                                break
+                        except:
+                            pass
+                    
+                    if not found_replacement:
+                        # 如果所有列都不对，说明数据源彻底坏了，可能是缓存了脏数据
+                        # 抛出特定异常，触发清除缓存
+                        raise ValueError("CRITICAL_DATA_ERROR: 所有列看起来都像是索引，请求清除缓存")
+                # -----------------------------------------------
+
+                # 4. 过滤无效数据
+                hist_df = hist_df.dropna(subset=['净值日期', '单位净值'])
+                hist_df = hist_df.sort_values('净值日期')
+                
+                # 5. 过滤异常值（防止极值导致图表变成直线）
+                # 基金净值通常在 0.1 到 10 之间
+                hist_df = hist_df[(hist_df['单位净值'] > 0.01) & (hist_df['单位净值'] < 20)]
+
         # 4. 计算布林带
-        window = 20
-        k = 2
-        hist_df['MB'] = hist_df['单位净值'].rolling(window=window).mean()
-        hist_df['STD'] = hist_df['单位净值'].rolling(window=window).std()
-        hist_df['UB'] = hist_df['MB'] + k * hist_df['STD']
-        hist_df['LB'] = hist_df['MB'] - k * hist_df['STD']
+        if hist_df is not None and not hist_df.empty and len(hist_df) > 20:
+            window = 20
+            k = 2
+            hist_df['MB'] = hist_df['单位净值'].rolling(window=window).mean()
+            hist_df['STD'] = hist_df['单位净值'].rolling(window=window).std()
+            hist_df['UB'] = hist_df['MB'] + k * hist_df['STD']
+            hist_df['LB'] = hist_df['MB'] - k * hist_df['STD']
+        else:
+            error = "数据不足，无法计算布林带"
 
     except Exception as e:
-        error = f"数据获取失败: {str(e)}"
+        error_str = str(e)
+        if "CRITICAL_DATA_ERROR" in error_str:
+            # 严重数据错误，自动清除缓存
+            st.cache_data.clear()
+            error = "检测到严重数据异常，已自动清除缓存。请手动刷新页面重试。"
+        else:
+            error = f"数据获取失败: {error_str}"
     
     return realtime_info, hist_df, error
 
@@ -389,12 +367,20 @@ def plot_bollinger_plotly(df, days):
         name='低估信号'
     ))
 
+    # 动态设置Y轴范围，避免异常值导致显示成直线
+    y_vals = pd.concat([plot_data['UB'], plot_data['LB'], plot_data['单位净值']])
+    y_min = y_vals.min()
+    y_max = y_vals.max()
+    y_range = y_max - y_min
+    if y_range == 0: y_range = 0.1 # 防止除0
+    
     fig.update_layout(
         hovermode="x unified",
         margin=dict(l=20, r=20, t=40, b=20),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         xaxis_title="日期",
         yaxis_title="净值",
+        yaxis=dict(range=[y_min - y_range*0.1, y_max + y_range*0.1]), # 上下留10%余量
         dragmode="pan"
     )
     
