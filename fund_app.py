@@ -8,7 +8,7 @@ from datetime import datetime
 # 1. 页面配置
 # ==========================================
 st.set_page_config(
-    page_title="基金分析重制版",
+    page_title="基金分析",
     page_icon="📈",
     layout="wide"
 )
