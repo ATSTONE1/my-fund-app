@@ -37,7 +37,8 @@ def get_fund_data_v2(code):
             except Exception as e:
                 last_err = e
             import time
-            time.sleep(0.5) # 稍微歇一下
+            import random
+            time.sleep(random.uniform(1.0, 3.0)) # 增加等待时间，防止封禁
         raise last_err if last_err else Exception("获取数据为空")
 
     try:
@@ -315,6 +316,11 @@ def render_overview_page():
         progress_bar = st.progress(0)
         
         def fetch_single_fund_stats(code):
+            # 增加随机延迟，模拟人类行为
+            import time
+            import random
+            time.sleep(random.uniform(0.1, 1.0))
+            
             # 默认值
             stats = {
                 "基金代码": code,
@@ -340,9 +346,8 @@ def render_overview_page():
                 pass
             return stats
 
-        # 使用线程池并发请求 (最大50个线程)
-        # 注意：过高的并发可能会导致被数据源(东方财富)封禁 IP，50 属于激进设置，请谨慎使用
-        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+        # 使用线程池并发请求 (最大5个线程 - 降低并发以防封IP)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             # 提交所有任务
             future_to_code = {executor.submit(fetch_single_fund_stats, code): code for code in codes}
             
@@ -478,9 +483,14 @@ def render_overview_page():
     else:
         selection_mode = "single-row"
     
+    # 使用 Pandas Styler 进行颜色高亮
+    # 注意：st.dataframe 支持直接传入 Styler 对象
+    # 对齐方式：建议左对齐，数字右对齐
+    styled_df = final_df.style.map(highlight_change, subset=["估算增长率"])
+    
     # 使用 st.dataframe 的 selection 功能
     selection = st.dataframe(
-        final_df,
+        styled_df,
         key="overview_table",  # 添加固定 key 保持状态
         use_container_width=True,
         hide_index=True,
@@ -700,8 +710,24 @@ def render_detail_page(code):
     cols = ['date', 'value', '信号', 'UB', 'LB', 'MB', '日增长率']
     cols = [c for c in cols if c in display_df.columns]
     
+    # 样式优化：高亮涨跌
+    def highlight_history_change(val):
+        try:
+            val_num = float(val)
+            if val_num > 0:
+                return 'color: red'
+            elif val_num < 0:
+                return 'color: green'
+            else:
+                return ''
+        except:
+            return ''
+
+    # 使用 Pandas Styler 进行颜色高亮
+    styled_history_df = display_df[cols].sort_values('date', ascending=False).style.map(highlight_history_change, subset=["日增长率"])
+
     st.dataframe(
-        display_df[cols].sort_values('date', ascending=False),
+        styled_history_df,
         use_container_width=True,
         column_config={
             "date": "日期",
