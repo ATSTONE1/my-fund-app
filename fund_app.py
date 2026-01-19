@@ -20,18 +20,36 @@ st.set_page_config(
 def get_fund_data_v2(code):
     """
     重写的获取函数，不搞复杂的猜测，只做标准处理。
+    增加重试机制 (3次)
     """
     history_df = pd.DataFrame()
     realtime_data = None
     error_msg = None
     
+    # 重试装饰器逻辑
+    def fetch_with_retry(func, *args, retries=3):
+        last_err = None
+        for i in range(retries):
+            try:
+                res = func(*args)
+                if res is not None and not (isinstance(res, pd.DataFrame) and res.empty):
+                    return res
+            except Exception as e:
+                last_err = e
+            import time
+            time.sleep(0.5) # 稍微歇一下
+        raise last_err if last_err else Exception("获取数据为空")
+
     try:
         # --- A. 获取历史净值 ---
         # akshare 返回的标准列名通常是: '净值日期', '单位净值', '日增长率', ...
-        raw_df = ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势")
+        try:
+            raw_df = fetch_with_retry(ak.fund_open_fund_info_em, code, "单位净值走势")
+        except:
+            raw_df = None
         
         if raw_df is None or raw_df.empty:
-            return None, None, "接口未返回任何数据，请检查基金代码是否正确。"
+            return None, None, "接口未返回任何数据 (重试3次失败)，请检查基金代码是否正确或网络状态。"
 
         # 强制重命名列，防止列名带空格或不可见字符
         # 我们假设前两列大概率是 日期 和 净值，但为了保险，我们用列名匹配
@@ -42,6 +60,8 @@ def get_fund_data_v2(code):
                 col_map[c] = "date"
             elif "单位净值" in c_str:
                 col_map[c] = "value"
+            elif "日增长率" in c_str:
+                 col_map[c] = "日增长率"
         
         df = raw_df.rename(columns=col_map)
         
@@ -58,6 +78,8 @@ def get_fund_data_v2(code):
         # 类型转换
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
         df["value"] = pd.to_numeric(df["value"], errors="coerce")
+        if "日增长率" in df.columns:
+            df["日增长率"] = pd.to_numeric(df["日增长率"], errors="coerce")
         
         # 清洗无效行
         df = df.dropna(subset=["date", "value"])
@@ -92,7 +114,8 @@ def get_fund_data_v2(code):
 
         # --- B. 获取实时估值 (可选) ---
         try:
-            est_df = ak.fund_value_estimation_em()
+            # 同样重试3次
+            est_df = fetch_with_retry(ak.fund_value_estimation_em)
             # 找到对应代码的那一行
             target = est_df[est_df["基金代码"] == code]
             if not target.empty:
@@ -194,7 +217,7 @@ def plot_chart(df, days, title="布林带趋势分析", subtitle=None, enable_in
     
     if not buy_points.empty:
         buy_layer = alt.Chart(buy_points).mark_point(
-            shape='triangle-up', size=100, color='red', fill='red'
+            shape='triangle-up', size=100, color='green', fill='green'
         ).encode(
             x='date:T',
             y='value:Q',
@@ -204,7 +227,7 @@ def plot_chart(df, days, title="布林带趋势分析", subtitle=None, enable_in
         
     if not sell_points.empty:
         sell_layer = alt.Chart(sell_points).mark_point(
-            shape='triangle-down', size=100, color='green', fill='green'
+            shape='triangle-down', size=100, color='red', fill='red'
         ).encode(
             x='date:T',
             y='value:Q',
@@ -238,10 +261,15 @@ def plot_chart(df, days, title="布林带趋势分析", subtitle=None, enable_in
 @st.cache_data(ttl=600)
 def get_all_fund_estimation():
     """获取所有基金的实时估值数据 (缓存10分钟)"""
-    try:
-        return ak.fund_value_estimation_em()
-    except Exception as e:
-        return None
+    for _ in range(3):
+        try:
+            res = ak.fund_value_estimation_em()
+            if res is not None and not res.empty:
+                return res
+        except Exception:
+            import time
+            time.sleep(0.5)
+    return None
 
 def render_overview_page():
     # 标题栏 + 刷新按钮
@@ -292,15 +320,22 @@ def render_overview_page():
                 "基金代码": code,
                 "UB": None,
                 "LB": None, 
-                "建议": "数据不足"
+                "建议": "数据不足",
+                "昨日涨跌幅": None
             }
             try:
                 # 获取历史数据 (利用缓存)
                 hist_df, _, _ = get_fund_data_v2(code)
-                if hist_df is not None and not hist_df.empty and "UB" in hist_df.columns:
-                    latest = hist_df.iloc[-1]
-                    stats["UB"] = latest["UB"]
-                    stats["LB"] = latest["LB"]
+                if hist_df is not None and not hist_df.empty:
+                    # 获取 UB/LB
+                    if "UB" in hist_df.columns:
+                        latest = hist_df.iloc[-1]
+                        stats["UB"] = latest["UB"]
+                        stats["LB"] = latest["LB"]
+                    
+                    # 获取昨日涨跌幅 (兜底用)
+                    if "日增长率" in hist_df.columns:
+                         stats["昨日涨跌幅"] = hist_df.iloc[-1]["日增长率"]
             except:
                 pass
             return stats
@@ -392,6 +427,19 @@ def render_overview_page():
 
     final_df["建议"] = final_df.apply(calculate_final_signal, axis=1)
 
+    # 处理估算涨跌幅为空的情况 (使用昨日数据兜底)
+    def fix_rate_display(row):
+        rate = row.get("估算增长率")
+        if pd.isna(rate) or rate == "" or rate == "-":
+            # 尝试用昨日涨跌幅
+            y_rate = row.get("昨日涨跌幅")
+            if pd.notna(y_rate):
+                return f"{y_rate}% (昨日)"
+            return "-"
+        return rate
+
+    final_df["估算增长率"] = final_df.apply(fix_rate_display, axis=1)
+
     # 格式化展示
     display_cols = ["基金代码", "基金名称", "建议", "估算值", "估算增长率", "UB", "LB"]
     # 确保列存在
@@ -403,10 +451,14 @@ def render_overview_page():
     # 样式优化：高亮涨跌
     def highlight_change(val):
         try:
-            val_num = float(str(val).replace('%', ''))
-            # 中国习惯: 涨红跌绿
-            color = 'red' if val_num > 0 else 'green'
-            return f'color: {color}'
+            val_str = str(val).replace('%', '').replace(' (昨日)', '')
+            val_num = float(val_str)
+            if val_num > 0:
+                return 'color: red'
+            elif val_num < 0:
+                return 'color: green'
+            else:
+                return '' # 0 不变色
         except:
             return ''
 
@@ -539,12 +591,14 @@ def render_detail_page(code):
     # 尝试从实时数据里拿，拿不到就用历史数据最新的
     curr_val = latest["value"]
     curr_date = latest["date"].strftime("%Y-%m-%d")
-    curr_rate = "0.00%"
+    curr_rate = "-" # 默认为横杠，避免误导为 0.00%
     
     if rt_data:
         try:
-            k_val = next((k for k in rt_data.keys() if "估算值" in k), None)
-            k_rate = next((k for k in rt_data.keys() if "估算增长率" in k), None)
+            # 模糊匹配 key，防止列名变动
+            # 常见列名: "估算值", "gsz"; "估算增长率", "gszzl"
+            k_val = next((k for k in rt_data.keys() if "估算值" in str(k) or "gsz" in str(k)), None)
+            k_rate = next((k for k in rt_data.keys() if "估算增长率" in str(k) or "gszzl" in str(k)), None)
             
             if k_val: curr_val = float(rt_data[k_val])
             if k_rate: 
@@ -553,6 +607,14 @@ def render_detail_page(code):
             curr_date = "实时估算"
         except:
             pass
+            
+    # 如果实时没拿到涨幅，尝试用历史数据的"日增长率" (如果是今天的数据)
+    # 但通常历史数据是昨天的。为了不留空，可以显示昨天的，但要标明。
+    # 这里我们简单处理：如果还是 "-"，且历史数据里有日增长率，就显示历史的，但日期已经是"昨天"了
+    if curr_rate == "-" and "日增长率" in latest:
+         r = latest["日增长率"]
+         if pd.notna(r):
+             curr_rate = f"{r}% (昨日)"
 
     # 计算状态
     ub = latest["UB"] if "UB" in df.columns else 0
@@ -580,7 +642,8 @@ def render_detail_page(code):
 
     # 指标栏 - 第一行 (基础信息)
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("当前净值/估值", f"{curr_val:.4f}", curr_rate)
+    # 涨跌幅颜色逻辑: 涨红(inverse) 跌绿(inverse)
+    c1.metric("当前净值/估值", f"{curr_val:.4f}", curr_rate, delta_color="inverse")
     c2.metric("更新时间", curr_date)
     c3.metric("布林上轨 (阻力)", f"{ub:.4f}" if ub else "-")
     c4.metric("布林下轨 (支撑)", f"{lb:.4f}" if lb else "-")
@@ -590,7 +653,7 @@ def render_detail_page(code):
     k1, k2, k3, k4 = st.columns(4)
     
     k1.metric(f"近{len(period_df)}天涨跌", f"{period_change:.2f}%", 
-              delta_color="normal" if period_change > 0 else "inverse")
+              delta_color="inverse")
     
     k2.metric("区间最大回撤", f"{max_drawdown:.2f}%", 
               delta_color="off") 
