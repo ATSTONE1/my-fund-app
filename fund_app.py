@@ -233,18 +233,129 @@ def plot_chart(df, days, title="布林带趋势分析", subtitle=None, enable_in
         return chart
 
 # ==========================================
-# 4. 主程序
+# 4. 概览页逻辑
 # ==========================================
-def main():
-    # 侧边栏
-    with st.sidebar:
-        st.header("设置")
-        code = st.text_input("基金代码", value="017057", max_chars=6)
-        days = st.slider("显示天数", 30, 365, 120)
-        
-        # 新增图表交互开关
-        enable_zoom = st.checkbox("开启图表缩放/平移", value=False, help="手机端建议关闭此选项，以免影响页面滚动。开启后可对图表进行双指缩放和拖拽。")
+@st.cache_data(ttl=600)
+def get_all_fund_estimation():
+    """获取所有基金的实时估值数据 (缓存10分钟)"""
+    try:
+        return ak.fund_value_estimation_em()
+    except Exception as e:
+        return None
 
+def render_overview_page():
+    st.title("📊 基金批量概览")
+    
+    # 输入区域
+    with st.expander("📝 基金代码输入 (批量)", expanded=True):
+        default_codes = "017057, 005827, 161725, 012414, 161028"
+        input_text = st.text_area(
+            "请输入基金代码 (支持逗号、空格或换行分隔)", 
+            value=default_codes,
+            height=100
+        )
+        
+        # 解析代码
+        import re
+        codes = list(set(re.findall(r"\d{6}", input_text)))
+        st.caption(f"已识别 {len(codes)} 个有效基金代码")
+        
+    if not codes:
+        st.info("请输入基金代码以开始分析")
+        return
+
+    # 获取全量数据并筛选
+    with st.spinner("正在获取实时行情..."):
+        all_est_df = get_all_fund_estimation()
+        
+    if all_est_df is None or all_est_df.empty:
+        st.error("无法获取实时行情数据，请稍后重试")
+        return
+
+    # 筛选
+    # all_est_df 列名: 序号, 基金代码, 基金名称, 估算值, 估算增长率, 估算时间, 单位净值, 净值日期, 成立日期, 手续费
+    target_df = all_est_df[all_est_df["基金代码"].isin(codes)].copy()
+    
+    if target_df.empty:
+        st.warning("未找到对应基金数据，请检查代码是否正确")
+        return
+
+    # 格式化展示
+    # 重新排序列和重命名
+    display_cols = ["基金代码", "基金名称", "估算值", "估算增长率", "估算时间", "单位净值", "净值日期"]
+    # 确保列存在
+    display_cols = [c for c in display_cols if c in target_df.columns]
+    
+    final_df = target_df[display_cols].reset_index(drop=True)
+    
+    # 样式优化：高亮涨跌
+    def highlight_change(val):
+        try:
+            val_num = float(str(val).replace('%', ''))
+            color = 'red' if val_num < 0 else 'green' # 涨绿跌红? 还是涨红跌绿? 
+            # 中国习惯: 涨红跌绿
+            color = 'red' if val_num > 0 else 'green'
+            return f'color: {color}'
+        except:
+            return ''
+
+    # 显示表格 (支持选择)
+    st.subheader(f"📈 实时行情 ({len(final_df)}只)")
+    
+    # 使用 st.dataframe 的 selection 功能 (Streamlit 1.35+)
+    selection = st.dataframe(
+        final_df,
+        use_container_width=True,
+        hide_index=True,
+        selection_mode="single-row",
+        on_select="rerun",
+        column_config={
+            "估算增长率": st.column_config.TextColumn("估算涨幅"),
+            "估算值": st.column_config.NumberColumn("实时估值", format="%.4f"),
+            "单位净值": st.column_config.NumberColumn("昨日净值", format="%.4f"),
+        }
+    )
+    
+    # 检查是否有选中行
+    if selection and selection.selection and selection.selection.rows:
+        selected_idx = selection.selection.rows[0]
+        selected_code = final_df.iloc[selected_idx]["基金代码"]
+        # 更新状态并重运行
+        st.session_state.selected_code = selected_code
+        st.session_state.page = "detail"
+        st.rerun()
+
+    # 导出按钮
+    csv = final_df.to_csv(index=False).encode('utf-8-sig')
+    st.download_button(
+        "📥 导出今日概览数据 (CSV)", 
+        csv, 
+        f"fund_overview_{datetime.now().strftime('%Y%m%d')}.csv", 
+        "text/csv", 
+        use_container_width=True
+    )
+
+# ==========================================
+# 5. 详情页逻辑 (原 main 函数)
+# ==========================================
+def render_detail_page(code):
+    # 返回按钮
+    if st.button("⬅️ 返回列表"):
+        st.session_state.page = "overview"
+        st.rerun()
+        
+    # 侧边栏 (详情页专用)
+    with st.sidebar:
+        st.header("详情页设置")
+        # 允许在这里修改代码，虽然通常是从列表进来的
+        new_code = st.text_input("基金代码", value=code, max_chars=6)
+        if new_code != code:
+             st.session_state.selected_code = new_code
+             st.rerun()
+             
+        days = st.slider("显示天数", 30, 365, 120)
+        enable_zoom = st.checkbox("开启图表缩放/平移", value=False, help="手机端建议关闭此选项...")
+        
         if st.button("清除缓存"):
             st.cache_data.clear()
             st.rerun()
@@ -252,6 +363,9 @@ def main():
     # 标题
     st.title(f"📊 基金分析看板 ({code})")
 
+    # ... (后续逻辑复用原代码，只需把 code, days, enable_zoom 传入或在函数内使用) ...
+    # 为了减少缩进改动，我们把后面的逻辑直接搬过来，稍微调整缩进
+    
     if len(code) != 6:
         st.warning("请输入6位基金代码")
         return
@@ -277,15 +391,12 @@ def main():
     curr_rate = "0.00%"
     
     if rt_data:
-        # 也就是 '估算值' 和 '估算增长率'，但也可能是别的名字，这里做个模糊匹配
         try:
-            # 找 key 中包含 '估算值' 的
             k_val = next((k for k in rt_data.keys() if "估算值" in k), None)
             k_rate = next((k for k in rt_data.keys() if "估算增长率" in k), None)
             
             if k_val: curr_val = float(rt_data[k_val])
             if k_rate: 
-                # 修复可能重复的百分号
                 raw_rate = str(rt_data[k_rate]).replace("%", "")
                 curr_rate = f"{raw_rate}%"
             curr_date = "实时估算"
@@ -297,7 +408,6 @@ def main():
     lb = latest["LB"] if "LB" in df.columns else 0
     
     # --- 扩展指标计算 ---
-    # 1. 区间涨跌幅 (基于显示天数)
     period_df = df.tail(days)
     if not period_df.empty:
         start_val = period_df.iloc[0]["value"]
@@ -306,14 +416,12 @@ def main():
     else:
         period_change = 0
 
-    # 2. 最大回撤
-    # 计算公式：(当前值 - 之前最高值) / 之前最高值
+    # 最大回撤
     roll_max = period_df["value"].cummax()
     drawdown = (period_df["value"] - roll_max) / roll_max
     max_drawdown = drawdown.min() * 100
 
-    # 3. 布林带位置 (%B)
-    # 0=下轨, 1=上轨, >1=突破上轨, <0=跌破下轨
+    # 布林带位置 (%B)
     if ub != lb:
         pct_b = (curr_val - lb) / (ub - lb)
     else:
@@ -327,14 +435,14 @@ def main():
     c4.metric("布林下轨 (支撑)", f"{lb:.4f}" if lb else "-")
 
     # 指标栏 - 第二行 (进阶分析)
-    st.markdown("---") # 分割线
+    st.markdown("---") 
     k1, k2, k3, k4 = st.columns(4)
     
     k1.metric(f"近{len(period_df)}天涨跌", f"{period_change:.2f}%", 
               delta_color="normal" if period_change > 0 else "inverse")
     
     k2.metric("区间最大回撤", f"{max_drawdown:.2f}%", 
-              delta_color="off") # 回撤通常是负数，用灰色或红色表示风险
+              delta_color="off") 
               
     k3.metric("相对位置 (%B)", f"{pct_b:.2f}", 
               help=">1: 突破上轨 (超买); <0: 跌破下轨 (超卖)")
@@ -352,13 +460,12 @@ def main():
         signal_color = "blue"
         
     k4.markdown(f"**操作建议**:<br><span style='color:{signal_color};font-size:1.2em;font-weight:bold'>{signal_text}</span>", unsafe_allow_html=True)
-    st.markdown("---") # 分割线
+    st.markdown("---") 
 
     # 图表
     if "UB" in df.columns:
         st.caption("💡 提示：点击图表右上角的 **...** 按钮，选择 **Save as PNG** 即可下载高清趋势图")
         
-        # 构建图表标题信息
         chart_title = f"基金 {code} 趋势分析 ({days}天)"
         chart_subtitle = [
             f"最新: {curr_val:.4f} ({curr_rate}) | {curr_date}",
@@ -371,15 +478,12 @@ def main():
     else:
         st.warning("数据不足，无法计算布林带 (至少需要20天数据)")
 
-    # 原始数据查看 (放在折叠栏里，方便查错)
+    # 原始数据查看
     st.subheader("📋 历史数据明细")
     
-    # 格式化一下显示的 DataFrame
     display_df = df.copy()
     display_df['date'] = display_df['date'].dt.strftime('%Y-%m-%d')
-    # 只保留主要列，并按日期倒序
     cols = ['date', 'value', '信号', 'UB', 'LB', 'MB', '日增长率']
-    # 过滤掉不存在的列
     cols = [c for c in cols if c in display_df.columns]
     
     st.dataframe(
@@ -396,13 +500,25 @@ def main():
         }
     )
 
-    # 下载
     csv = df.to_csv(index=False).encode('utf-8-sig')
     st.download_button("📥 下载完整数据 (CSV)", csv, f"fund_{code}.csv", "text/csv", use_container_width=True)
 
-    # 调试信息 (已移除，如需恢复请取消注释)
-    # with st.expander("🛠️ 调试信息"):
-    #    ...
+# ==========================================
+# 6. 主程序入口
+# ==========================================
+def main():
+    # 初始化 session state
+    if 'page' not in st.session_state:
+        st.session_state.page = "overview"
+    if 'selected_code' not in st.session_state:
+        st.session_state.selected_code = "017057"
+
+    # 路由
+    if st.session_state.page == "overview":
+        render_overview_page()
+    elif st.session_state.page == "detail":
+        render_detail_page(st.session_state.selected_code)
+
 
 if __name__ == "__main__":
     main()
