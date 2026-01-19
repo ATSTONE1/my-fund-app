@@ -393,7 +393,7 @@ def render_overview_page():
     final_df["建议"] = final_df.apply(calculate_final_signal, axis=1)
 
     # 格式化展示
-    display_cols = ["基金代码", "基金名称", "估算值", "估算增长率", "UB", "LB", "建议"]
+    display_cols = ["基金代码", "基金名称", "建议", "估算值", "估算增长率", "UB", "LB"]
     # 确保列存在
     display_cols = [c for c in display_cols if c in final_df.columns]
     
@@ -435,11 +435,11 @@ def render_overview_page():
         selection_mode=selection_mode, 
         on_select="rerun",
         column_config={
+            "建议": st.column_config.TextColumn("操作建议"),
             "估算增长率": st.column_config.TextColumn("估算涨幅"),
             "估算值": st.column_config.NumberColumn("实时估值", format="%.4f"),
             "UB": st.column_config.NumberColumn("阻力位(UB)", format="%.4f"),
             "LB": st.column_config.NumberColumn("支撑位(LB)", format="%.4f"),
-            "建议": st.column_config.TextColumn("操作建议"),
         }
     )
     
