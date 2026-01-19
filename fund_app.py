@@ -244,55 +244,157 @@ def get_all_fund_estimation():
         return None
 
 def render_overview_page():
-    st.title("📊 基金批量概览")
+    # 标题栏 + 刷新按钮
+    c1, c2 = st.columns([6, 1])
+    with c1:
+        st.title("📊 基金批量概览")
+    with c2:
+        if st.button("🔄 刷新", use_container_width=True, help="清除缓存并强制重新拉取数据"):
+            st.cache_data.clear()
+            st.rerun()
     
     # 输入区域
-    with st.expander("📝 基金代码输入 (批量)", expanded=True):
-        default_codes = "017057, 005827, 161725, 012414, 161028"
-        input_text = st.text_area(
-            "请输入基金代码 (支持逗号、空格或换行分隔)", 
-            value=default_codes,
-            height=100
-        )
-        
-        # 解析代码
-        import re
-        codes = list(set(re.findall(r"\d{6}", input_text)))
-        st.caption(f"已识别 {len(codes)} 个有效基金代码")
+    st.subheader("📝 基金代码输入 (批量)")
+    default_codes = "017057, 005827, 161725, 012414, 161028"
+    input_text = st.text_area(
+        "请输入基金代码 (支持逗号、空格或换行分隔)", 
+        value=default_codes,
+        height=100,
+        label_visibility="collapsed" # 隐藏label，因为上面已经有subheader了
+    )
+    
+    # 解析代码
+    import re
+    codes = list(set(re.findall(r"\d{6}", input_text)))
+    st.caption(f"已识别 {len(codes)} 个有效基金代码")
         
     if not codes:
         st.info("请输入基金代码以开始分析")
         return
 
     # 获取全量数据并筛选
-    with st.spinner("正在获取实时行情..."):
+    with st.spinner("正在获取实时行情和计算指标..."):
         all_est_df = get_all_fund_estimation()
         
-    if all_est_df is None or all_est_df.empty:
-        st.error("无法获取实时行情数据，请稍后重试")
-        return
+        # 预先计算指标 (UB, LB, 信号)
+        # 注意：这里需要逐个获取历史数据来计算，可能会比较慢
+        stats_list = []
+        progress_bar = st.progress(0)
+        
+        for i, code in enumerate(codes):
+            # 更新进度条
+            progress_bar.progress((i + 1) / len(codes))
+            
+            # 默认值
+            stats = {
+                "基金代码": code,
+                "UB": None,
+                "LB": None, 
+                "建议": "数据不足"
+            }
+            
+            # 获取历史数据 (利用缓存)
+            # get_fund_data_v2 返回: history_df, realtime_data, error_msg
+            hist_df, _, _ = get_fund_data_v2(code)
+            
+            if hist_df is not None and not hist_df.empty and "UB" in hist_df.columns:
+                latest = hist_df.iloc[-1]
+                stats["UB"] = latest["UB"]
+                stats["LB"] = latest["LB"]
+                # 信号计算将在合并实时数据后进行，这里先存阈值
+            
+            stats_list.append(stats)
+            
+        progress_bar.empty() # 清除进度条
+        stats_df = pd.DataFrame(stats_list)
 
-    # 筛选
-    # all_est_df 列名: 序号, 基金代码, 基金名称, 估算值, 估算增长率, 估算时间, 单位净值, 净值日期, 成立日期, 手续费
-    target_df = all_est_df[all_est_df["基金代码"].isin(codes)].copy()
+    if all_est_df is None or all_est_df.empty:
+        # 如果获取不到实时数据，至少展示历史计算结果
+        st.warning("无法获取实时行情数据，仅显示历史分析结果")
+        # 创建一个空的实时数据结构以供后续合并
+        all_est_df = pd.DataFrame(columns=["基金代码", "基金名称", "估算值", "估算增长率"])
     
-    if target_df.empty:
-        st.warning("未找到对应基金数据，请检查代码是否正确")
-        return
+    # 筛选
+    # 构造基础 DataFrame，确保所有输入代码都在列表中
+    input_df = pd.DataFrame({"基金代码": codes})
+    
+    # 处理列名动态变化的问题 (比如 '2026-01-19-估算数据-估算值')
+    col_mapping = {}
+    for c in all_est_df.columns:
+        if "估算值" in c and "估算数据" in c:
+            col_mapping[c] = "估算值"
+        elif "估算增长率" in c and "估算数据" in c:
+            col_mapping[c] = "估算增长率"
+        elif "单位净值" in c and "公布数据" in c:
+            col_mapping[c] = "单位净值"
+        elif "日增长率" in c and "公布数据" in c:
+            col_mapping[c] = "日增长率"
+        elif "估算时间" in c:
+            col_mapping[c] = "估算时间"
+            
+    # 重命名列
+    all_est_df = all_est_df.rename(columns=col_mapping)
+    
+    # 左连接，保留所有输入代码
+    all_est_df["基金代码"] = all_est_df["基金代码"].astype(str)
+    
+    # 1. 合并输入代码和实时数据
+    merged_df = pd.merge(input_df, all_est_df, on="基金代码", how="left")
+    
+    # 2. 合并计算指标 (UB, LB)
+    final_df = pd.merge(merged_df, stats_df, on="基金代码", how="left")
+    
+    # 如果没匹配到，填充默认值
+    final_df["基金名称"] = final_df["基金名称"].fillna("未知/无实时数据")
+    # 不要过早 fillna("-")，因为还需要计算
+    
+    # 计算最终信号 (实时值 vs UB/LB)
+    def calculate_final_signal(row):
+        try:
+            # 获取当前值：优先用实时估算值，没有则用单位净值(如果有的话，但在all_est_df里可能没有最新的，这里主要靠实时)
+            # 如果实时估算值是 NaN，尝试用单位净值
+            curr_val = row.get("估算值")
+            if pd.isna(curr_val) or curr_val == "":
+                 curr_val = row.get("单位净值")
+            
+            # 如果还是拿不到数值，就没法比较
+            if pd.isna(curr_val) or curr_val == "-":
+                return "数据不足"
+                
+            val = float(curr_val)
+            ub = float(row["UB"])
+            lb = float(row["LB"])
+            
+            if pd.isna(ub) or pd.isna(lb):
+                return "数据不足"
+                
+            if val > ub:
+                return "卖出 (高估)"
+            elif val < lb:
+                return "买入 (低估)"
+            else:
+                return "持有"
+        except:
+            return "数据不足"
+
+    final_df["建议"] = final_df.apply(calculate_final_signal, axis=1)
+
+    # 添加详情链接列 (利用 query params 导航)
+    # 注意：本地开发环境和部署环境 URL 可能不同，相对路径 /?code=xxx 通常有效
+    final_df["详情"] = final_df["基金代码"].apply(lambda x: f"/?code={x}")
 
     # 格式化展示
-    # 重新排序列和重命名
-    display_cols = ["基金代码", "基金名称", "估算值", "估算增长率", "估算时间", "单位净值", "净值日期"]
+    display_cols = ["基金代码", "基金名称", "估算值", "估算增长率", "UB", "LB", "建议", "详情"]
     # 确保列存在
-    display_cols = [c for c in display_cols if c in target_df.columns]
+    display_cols = [c for c in display_cols if c in final_df.columns]
     
-    final_df = target_df[display_cols].reset_index(drop=True)
+    final_df = final_df[display_cols]
+    final_df = final_df.fillna("-")
     
     # 样式优化：高亮涨跌
     def highlight_change(val):
         try:
             val_num = float(str(val).replace('%', ''))
-            color = 'red' if val_num < 0 else 'green' # 涨绿跌红? 还是涨红跌绿? 
             # 中国习惯: 涨红跌绿
             color = 'red' if val_num > 0 else 'green'
             return f'color: {color}'
@@ -301,34 +403,41 @@ def render_overview_page():
 
     # 显示表格 (支持选择)
     st.subheader(f"📈 实时行情 ({len(final_df)}只)")
+    st.caption("💡 勾选左侧复选框选择导出，点击右侧 **进入** 按钮查看详情")
     
-    # 使用 st.dataframe 的 selection 功能 (Streamlit 1.35+)
+    # 使用 st.dataframe 的 selection 功能
     selection = st.dataframe(
         final_df,
+        key="overview_table",  # 添加固定 key 保持状态
         use_container_width=True,
         hide_index=True,
-        selection_mode="single-row",
+        selection_mode="multi-row", # 多选用于导出
         on_select="rerun",
         column_config={
             "估算增长率": st.column_config.TextColumn("估算涨幅"),
             "估算值": st.column_config.NumberColumn("实时估值", format="%.4f"),
-            "单位净值": st.column_config.NumberColumn("昨日净值", format="%.4f"),
+            "UB": st.column_config.NumberColumn("阻力位(UB)", format="%.4f"),
+            "LB": st.column_config.NumberColumn("支撑位(LB)", format="%.4f"),
+            "建议": st.column_config.TextColumn("操作建议"),
+            "详情": st.column_config.LinkColumn("查看详情", display_text="🔘 进入"),
         }
     )
     
-    # 检查是否有选中行
+    # 处理导出逻辑 (根据选择)
+    export_df = final_df
     if selection and selection.selection and selection.selection.rows:
-        selected_idx = selection.selection.rows[0]
-        selected_code = final_df.iloc[selected_idx]["基金代码"]
-        # 更新状态并重运行
-        st.session_state.selected_code = selected_code
-        st.session_state.page = "detail"
-        st.rerun()
+        selected_indices = selection.selection.rows
+        export_df = final_df.iloc[selected_indices]
+        st.info(f"已选择 {len(export_df)} 只基金用于导出")
 
     # 导出按钮
-    csv = final_df.to_csv(index=False).encode('utf-8-sig')
+    # 移除 '详情' 列 (链接) 避免导出
+    if "详情" in export_df.columns:
+        export_df = export_df.drop(columns=["详情"])
+        
+    csv = export_df.to_csv(index=False).encode('utf-8-sig')
     st.download_button(
-        "📥 导出今日概览数据 (CSV)", 
+        f"📥 导出数据 ({len(export_df)}只)", 
         csv, 
         f"fund_overview_{datetime.now().strftime('%Y%m%d')}.csv", 
         "text/csv", 
@@ -339,29 +448,31 @@ def render_overview_page():
 # 5. 详情页逻辑 (原 main 函数)
 # ==========================================
 def render_detail_page(code):
-    # 返回按钮
-    if st.button("⬅️ 返回列表"):
-        st.session_state.page = "overview"
-        st.rerun()
-        
-    # 侧边栏 (详情页专用)
-    with st.sidebar:
-        st.header("详情页设置")
-        # 允许在这里修改代码，虽然通常是从列表进来的
-        new_code = st.text_input("基金代码", value=code, max_chars=6)
-        if new_code != code:
-             st.session_state.selected_code = new_code
-             st.rerun()
-             
-        days = st.slider("显示天数", 30, 365, 120)
-        enable_zoom = st.checkbox("开启图表缩放/平移", value=False, help="手机端建议关闭此选项...")
-        
-        if st.button("清除缓存"):
+    # 顶部导航: 返回 | 标题 | 刷新
+    c_back, c_title, c_refresh = st.columns([1, 5, 1])
+    with c_back:
+        if st.button("⬅️ 返回", use_container_width=True):
+            st.query_params.clear() # 清除 URL 参数防止死循环
+            st.session_state.page = "overview"
+            st.rerun()
+            
+    with c_title:
+        st.markdown(f"<h3 style='text-align: center; margin: 0; padding-top: 10px;'>📊 基金分析看板 ({code})</h3>", unsafe_allow_html=True)
+
+    with c_refresh:
+        if st.button("🔄 刷新", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
 
-    # 标题
-    st.title(f"📊 基金分析看板 ({code})")
+    # 详情页设置
+    with st.expander("⚙️ 图表设置", expanded=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            days = st.slider("显示天数", 30, 365, 120)
+        with c2:
+            st.write("") # 占位
+            st.write("") 
+            enable_zoom = st.checkbox("开启图表缩放/平移 (手机端建议关闭)", value=False)
 
     # ... (后续逻辑复用原代码，只需把 code, days, enable_zoom 传入或在函数内使用) ...
     # 为了减少缩进改动，我们把后面的逻辑直接搬过来，稍微调整缩进
@@ -507,6 +618,12 @@ def render_detail_page(code):
 # 6. 主程序入口
 # ==========================================
 def main():
+    # 检查 URL 参数以支持直接导航 (配合表格中的链接按钮)
+    if "code" in st.query_params:
+        code_param = st.query_params["code"]
+        st.session_state.page = "detail"
+        st.session_state.selected_code = code_param
+
     # 初始化 session state
     if 'page' not in st.session_state:
         st.session_state.page = "overview"
@@ -515,6 +632,9 @@ def main():
 
     # 路由
     if st.session_state.page == "overview":
+        # 如果在概览页，清除可能残留的 code 参数
+        if "code" in st.query_params:
+             st.query_params.clear()
         render_overview_page()
     elif st.session_state.page == "detail":
         render_detail_page(st.session_state.selected_code)
