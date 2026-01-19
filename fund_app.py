@@ -280,14 +280,13 @@ def render_overview_page():
         all_est_df = get_all_fund_estimation()
         
         # 预先计算指标 (UB, LB, 信号)
-        # 注意：这里需要逐个获取历史数据来计算，可能会比较慢
+        # 使用并行计算加速历史数据获取
+        import concurrent.futures
+        
         stats_list = []
         progress_bar = st.progress(0)
         
-        for i, code in enumerate(codes):
-            # 更新进度条
-            progress_bar.progress((i + 1) / len(codes))
-            
+        def fetch_single_fund_stats(code):
             # 默认值
             stats = {
                 "基金代码": code,
@@ -295,18 +294,29 @@ def render_overview_page():
                 "LB": None, 
                 "建议": "数据不足"
             }
+            try:
+                # 获取历史数据 (利用缓存)
+                hist_df, _, _ = get_fund_data_v2(code)
+                if hist_df is not None and not hist_df.empty and "UB" in hist_df.columns:
+                    latest = hist_df.iloc[-1]
+                    stats["UB"] = latest["UB"]
+                    stats["LB"] = latest["LB"]
+            except:
+                pass
+            return stats
+
+        # 使用线程池并发请求 (最大50个线程)
+        # 注意：过高的并发可能会导致被数据源(东方财富)封禁 IP，50 属于激进设置，请谨慎使用
+        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+            # 提交所有任务
+            future_to_code = {executor.submit(fetch_single_fund_stats, code): code for code in codes}
             
-            # 获取历史数据 (利用缓存)
-            # get_fund_data_v2 返回: history_df, realtime_data, error_msg
-            hist_df, _, _ = get_fund_data_v2(code)
-            
-            if hist_df is not None and not hist_df.empty and "UB" in hist_df.columns:
-                latest = hist_df.iloc[-1]
-                stats["UB"] = latest["UB"]
-                stats["LB"] = latest["LB"]
-                # 信号计算将在合并实时数据后进行，这里先存阈值
-            
-            stats_list.append(stats)
+            # 处理结果
+            for i, future in enumerate(concurrent.futures.as_completed(future_to_code)):
+                stats = future.result()
+                stats_list.append(stats)
+                # 更新进度条
+                progress_bar.progress((i + 1) / len(codes))
             
         progress_bar.empty() # 清除进度条
         stats_df = pd.DataFrame(stats_list)
