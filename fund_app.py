@@ -255,13 +255,16 @@ def render_overview_page():
     
     # 输入区域
     st.subheader("📝 基金代码输入 (批量)")
-    default_codes = "017057, 005827, 161725, 012414, 161028"
-    input_text = st.text_area(
-        "请输入基金代码 (支持逗号、空格或换行分隔)", 
-        value=default_codes,
-        height=100,
-        label_visibility="collapsed" # 隐藏label，因为上面已经有subheader了
-    )
+    
+    with st.form(key="search_form"):
+        default_codes = "017057, 005827, 161725, 012414, 161028"
+        input_text = st.text_area(
+            "请输入基金代码 (支持逗号、空格或换行分隔)", 
+            value=default_codes,
+            height=100,
+            label_visibility="collapsed" # 隐藏label，因为上面已经有subheader了
+        )
+        submit_btn = st.form_submit_button("🔍 开始分析", use_container_width=True)
     
     # 解析代码
     import re
