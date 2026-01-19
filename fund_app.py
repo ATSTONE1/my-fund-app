@@ -382,12 +382,8 @@ def render_overview_page():
 
     final_df["建议"] = final_df.apply(calculate_final_signal, axis=1)
 
-    # 添加详情链接列 (利用 query params 导航)
-    # 注意：本地开发环境和部署环境 URL 可能不同，相对路径 /?code=xxx 通常有效
-    final_df["详情"] = final_df["基金代码"].apply(lambda x: f"/?code={x}")
-
     # 格式化展示
-    display_cols = ["基金代码", "基金名称", "估算值", "估算增长率", "UB", "LB", "建议", "详情"]
+    display_cols = ["基金代码", "基金名称", "估算值", "估算增长率", "UB", "LB", "建议"]
     # 确保列存在
     display_cols = [c for c in display_cols if c in final_df.columns]
     
@@ -406,7 +402,19 @@ def render_overview_page():
 
     # 显示表格 (支持选择)
     st.subheader(f"📈 实时行情 ({len(final_df)}只)")
-    st.caption("💡 勾选左侧复选框选择导出，点击右侧 **进入** 按钮查看详情")
+    
+    # 操作模式切换
+    col_help, col_toggle = st.columns([3, 1])
+    with col_help:
+        st.caption("💡 **默认模式**：点击表格行 **直接查看详情**。")
+    with col_toggle:
+        is_batch = st.toggle("🛠️ 批量导出模式", value=False)
+        
+    if is_batch:
+        st.caption("✅ **批量模式已开启**：勾选多行可批量导出，点击行不会跳转。")
+        selection_mode = "multi-row"
+    else:
+        selection_mode = "single-row"
     
     # 使用 st.dataframe 的 selection 功能
     selection = st.dataframe(
@@ -414,7 +422,7 @@ def render_overview_page():
         key="overview_table",  # 添加固定 key 保持状态
         use_container_width=True,
         hide_index=True,
-        selection_mode="multi-row", # 多选用于导出
+        selection_mode=selection_mode, 
         on_select="rerun",
         column_config={
             "估算增长率": st.column_config.TextColumn("估算涨幅"),
@@ -422,30 +430,49 @@ def render_overview_page():
             "UB": st.column_config.NumberColumn("阻力位(UB)", format="%.4f"),
             "LB": st.column_config.NumberColumn("支撑位(LB)", format="%.4f"),
             "建议": st.column_config.TextColumn("操作建议"),
-            "详情": st.column_config.LinkColumn("查看详情", display_text="🔘 进入"),
         }
     )
     
-    # 处理导出逻辑 (根据选择)
-    export_df = final_df
-    if selection and selection.selection and selection.selection.rows:
-        selected_indices = selection.selection.rows
-        export_df = final_df.iloc[selected_indices]
-        st.info(f"已选择 {len(export_df)} 只基金用于导出")
-
-    # 导出按钮
-    # 移除 '详情' 列 (链接) 避免导出
-    if "详情" in export_df.columns:
-        export_df = export_df.drop(columns=["详情"])
+    # 逻辑分流
+    if is_batch:
+        # 批量模式：只处理导出
+        selected_rows = []
+        if selection and selection.selection and selection.selection.rows:
+            selected_rows = selection.selection.rows
+            
+        export_df = final_df
+        export_label = f"📥 导出全部 ({len(final_df)}只)"
         
-    csv = export_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button(
-        f"📥 导出数据 ({len(export_df)}只)", 
-        csv, 
-        f"fund_overview_{datetime.now().strftime('%Y%m%d')}.csv", 
-        "text/csv", 
-        use_container_width=True
-    )
+        if selected_rows:
+            export_df = final_df.iloc[selected_rows]
+            export_label = f"📥 导出选中 ({len(export_df)}只)"
+            
+        csv = export_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            export_label, 
+            csv, 
+            f"fund_overview_{datetime.now().strftime('%Y%m%d')}.csv", 
+            "text/csv", 
+            use_container_width=True
+        )
+    else:
+        # 默认模式：点击即跳转
+        if selection and selection.selection and selection.selection.rows:
+            selected_idx = selection.selection.rows[0]
+            selected_code = final_df.iloc[selected_idx]["基金代码"]
+            st.session_state.selected_code = selected_code
+            st.session_state.page = "detail"
+            st.rerun()
+            
+        # 默认模式下也保留一个导出全部按钮，方便不切模式也能导
+        csv = final_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            "📥 导出今日概览数据 (CSV)", 
+            csv, 
+            f"fund_overview_{datetime.now().strftime('%Y%m%d')}.csv", 
+            "text/csv", 
+            use_container_width=True
+        )
 
 # ==========================================
 # 5. 详情页逻辑 (原 main 函数)
