@@ -16,7 +16,7 @@ st.set_page_config(
 # ==========================================
 # 2. 核心数据获取 (极简稳健版)
 # ==========================================
-@st.cache_data(ttl=300)
+# @st.cache_data(ttl=300) # 移除缓存，强制实时更新
 def get_fund_data_v2(code):
     """
     重写的获取函数，不搞复杂的猜测，只做标准处理。
@@ -259,9 +259,9 @@ def plot_chart(df, days, title="布林带趋势分析", subtitle=None, enable_in
 # ==========================================
 # 4. 概览页逻辑
 # ==========================================
-@st.cache_data(ttl=60)
+# @st.cache_data(ttl=60) # 移除缓存，强制实时更新
 def get_all_fund_estimation():
-    """获取所有基金的实时估值数据 (缓存1分钟)"""
+    """获取所有基金的实时估值数据 (实时获取，无缓存)"""
     for _ in range(3):
         try:
             res = ak.fund_value_estimation_em()
@@ -337,7 +337,7 @@ def render_overview_page():
                 "昨日涨跌幅": None
             }
             try:
-                # 获取历史数据 (利用缓存)
+                # 获取历史数据 (已移除缓存，强制重试)
                 hist_df, _, _ = get_fund_data_v2(code)
                 if hist_df is not None and not hist_df.empty:
                     # 获取 UB/LB
