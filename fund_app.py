@@ -261,15 +261,33 @@ def plot_chart(df, days, title="布林带趋势分析", subtitle=None, enable_in
 # ==========================================
 # @st.cache_data(ttl=60) # 移除缓存，强制实时更新
 def get_all_fund_estimation():
-    """获取所有基金的实时估值数据 (实时获取，无缓存)"""
-    for _ in range(3):
+    """
+    获取所有基金的实时估值数据 (实时获取，无缓存)
+    增加了更严格的重试机制：
+    1. 捕获异常
+    2. 检查数据量 (如果少于 5000 条，认为数据残缺，触发重试)
+    """
+    last_err = None
+    for i in range(3):
         try:
             res = ak.fund_value_estimation_em()
             if res is not None and not res.empty:
-                return res
-        except Exception:
-            import time
-            time.sleep(0.5)
+                # 简单校验数据量，防止获取到残缺数据
+                if len(res) > 5000: 
+                    return res
+                else:
+                    last_err = Exception(f"数据量异常，仅获取到 {len(res)} 条")
+        except Exception as e:
+            last_err = e
+        
+        # 失败后等待
+        import time
+        import random
+        time.sleep(random.uniform(1.0, 3.0)) # 随机延迟 1-3秒
+        
+    # 如果3次都失败，记录日志或做点什么（这里返回None，由外层处理）
+    if last_err:
+        print(f"实时估值获取失败: {last_err}")
     return None
 
 def render_overview_page():
@@ -311,8 +329,19 @@ def render_overview_page():
         st.info("请输入基金代码以开始分析")
         return
 
+    # 添加数据说明，解释为什么会有空值
+    with st.expander("❓ 为什么有些基金没有实时估值？"):
+        st.markdown("""
+        **可能的原因包括：**
+        1.  **QDII 基金**：如纳指、标普500等，因时差原因，A股交易时间段内通常没有实时估值。
+        2.  **新成立/封闭期基金**：部分新发基金或处于封闭期的基金暂不披露实时净值估算。
+        3.  **数据源限制**：部分冷门基金可能未被第三方数据源（如东方财富）收录实时估值。
+        
+        👉 **系统已为您自动处理**：如果获取不到实时估值，系统会自动尝试使用**最新的历史净值**进行兜底分析，确保您能看到操作建议。
+        """)
+
     # 获取全量数据并筛选
-    with st.spinner("正在获取实时行情和计算指标..."):
+    with st.spinner("正在获取实时行情和计算指标 (已开启3次重试机制)..."):
         all_est_df = get_all_fund_estimation()
         
         # 预先计算指标 (UB, LB, 信号)
@@ -334,7 +363,8 @@ def render_overview_page():
                 "UB": None,
                 "LB": None, 
                 "建议": "数据不足",
-                "昨日涨跌幅": None
+                "昨日涨跌幅": None,
+                "最新净值": None # 新增：用于实时数据缺失时的兜底
             }
             try:
                 # 获取历史数据 (已移除缓存，强制重试)
@@ -349,6 +379,10 @@ def render_overview_page():
                     # 获取昨日涨跌幅 (兜底用)
                     if "日增长率" in hist_df.columns:
                          stats["昨日涨跌幅"] = hist_df.iloc[-1]["日增长率"]
+                    
+                    # 获取最新净值 (兜底用)
+                    if "value" in hist_df.columns:
+                        stats["最新净值"] = hist_df.iloc[-1]["value"]
             except:
                 pass
             return stats
@@ -414,11 +448,15 @@ def render_overview_page():
             # 获取当前值：优先用实时估算值，没有则用单位净值(如果有的话，但在all_est_df里可能没有最新的，这里主要靠实时)
             # 如果实时估算值是 NaN，尝试用单位净值
             curr_val = row.get("估算值")
-            if pd.isna(curr_val) or curr_val == "":
+            if pd.isna(curr_val) or curr_val == "" or curr_val == "-":
                  curr_val = row.get("单位净值")
             
+            # 再次尝试用历史数据里的最新净值兜底
+            if pd.isna(curr_val) or curr_val == "" or curr_val == "-":
+                 curr_val = row.get("最新净值")
+            
             # 如果还是拿不到数值，就没法比较
-            if pd.isna(curr_val) or curr_val == "-":
+            if pd.isna(curr_val) or curr_val == "-" or curr_val == "None":
                 return "数据不足"
                 
             val = float(curr_val)
@@ -438,6 +476,18 @@ def render_overview_page():
             return "数据不足"
 
     final_df["建议"] = final_df.apply(calculate_final_signal, axis=1)
+
+    # 修复估算值显示：如果为空，使用最新净值填充，并标记
+    def fix_est_value_display(row):
+        val = row.get("估算值")
+        if pd.isna(val) or val == "" or val == "-":
+            fallback = row.get("最新净值")
+            if pd.notna(fallback) and fallback != "":
+                return f"{fallback:.4f} (昨日)"
+            return "-"
+        return val
+        
+    final_df["估算值"] = final_df.apply(fix_est_value_display, axis=1)
 
     # 处理估算涨跌幅为空的情况 (使用昨日数据兜底)
     def fix_rate_display(row):
@@ -506,7 +556,7 @@ def render_overview_page():
         column_config={
             "建议": st.column_config.TextColumn("操作建议"),
             "估算增长率": st.column_config.TextColumn("估算涨幅"),
-            "估算值": st.column_config.NumberColumn("实时估值", format="%.4f"),
+            "估算值": st.column_config.TextColumn("实时/最新净值"), # 改为TextColumn以支持"(昨日)"后缀
             "UB": st.column_config.NumberColumn("阻力位(UB)", format="%.4f"),
             "LB": st.column_config.NumberColumn("支撑位(LB)", format="%.4f"),
         }
