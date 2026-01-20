@@ -259,9 +259,9 @@ def plot_chart(df, days, title="布林带趋势分析", subtitle=None, enable_in
 # ==========================================
 # 4. 概览页逻辑
 # ==========================================
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=60)
 def get_all_fund_estimation():
-    """获取所有基金的实时估值数据 (缓存10分钟)"""
+    """获取所有基金的实时估值数据 (缓存1分钟)"""
     for _ in range(3):
         try:
             res = ak.fund_value_estimation_em()
@@ -282,20 +282,27 @@ def render_overview_page():
             st.cache_data.clear()
             st.rerun()
     
+    # 初始化 session_state 中的输入代码
+    if "last_input_codes" not in st.session_state:
+        st.session_state.last_input_codes = "017057, 005827, 161725, 012414, 161028"
+
     # 输入区域
     st.subheader("📝 基金代码输入 (批量)")
     
     with st.form(key="search_form"):
-        default_codes = "017057, 005827, 161725, 012414, 161028"
         input_text = st.text_area(
             "请输入基金代码 (支持逗号、空格或换行分隔)", 
-            value=default_codes,
+            value=st.session_state.last_input_codes,
             height=100,
             label_visibility="collapsed" # 隐藏label，因为上面已经有subheader了
         )
         submit_btn = st.form_submit_button("🔍 开始分析", use_container_width=True)
     
-    # 解析代码
+    # 如果提交了，更新 session_state
+    if submit_btn:
+        st.session_state.last_input_codes = input_text
+
+    # 解析代码 (优先使用当前输入框的值，如果刚从详情页回来没提交，input_text 也是 session 中的值)
     import re
     codes = list(set(re.findall(r"\d{6}", input_text)))
     st.caption(f"已识别 {len(codes)} 个有效基金代码")
