@@ -17,11 +17,11 @@ st.set_page_config(
 # 2. 核心数据获取 (极简稳健版)
 # ==========================================
 @st.cache_data(ttl=14400) # 缓存4小时，因为历史净值一天只更新一次
-def get_fund_data_v2(code, fetch_realtime=True):
+def get_fund_data_v2(code):
     """
     重写的获取函数，不搞复杂的猜测，只做标准处理。
     增加重试机制 (3次)
-    fetch_realtime: 是否获取实时估值 (概览页批量获取时可关闭以提速)
+    仅获取历史数据，实时数据请单独获取
     """
     history_df = pd.DataFrame()
     realtime_data = None
@@ -114,25 +114,9 @@ def get_fund_data_v2(code, fetch_realtime=True):
         
         history_df = df
 
-        # --- B. 获取实时估值 (可选) ---
-        if fetch_realtime:
-            # 针对特定基金的重试逻辑：如果没找到该基金，也视为失败并重试 (最多3次)
-            for _ in range(3):
-                try:
-                    # 获取全量估值数据
-                    est_df = ak.fund_value_estimation_em()
-                    if est_df is not None and not est_df.empty:
-                        target = est_df[est_df["基金代码"] == code]
-                        if not target.empty:
-                            realtime_data = target.iloc[0].to_dict()
-                            break # 成功获取到特定基金数据，退出循环
-                except Exception:
-                    pass
-                
-                # 简单回退，避免过于频繁请求
-                import time
-                import random
-                time.sleep(random.uniform(0.5, 1.5))
+        # --- B. 获取实时估值 (已移除) ---
+        # 实时数据变动频繁，不适合与历史数据一起缓存4小时
+        # 请在外部单独调用 get_all_fund_estimation 获取实时数据
 
     except Exception as e:
         error_msg = f"发生未预期的错误: {str(e)}"
@@ -416,8 +400,8 @@ def render_overview_page():
             }
             try:
                 # 获取历史数据 (已移除缓存，强制重试)
-                # 概览页不需要在此处获取实时数据，因为外部已经批量获取了，设为 False 以加速
-                hist_df, _, _ = get_fund_data_v2(code, fetch_realtime=False)
+                # 概览页不需要在此处获取实时数据，因为外部已经批量获取了
+                hist_df, _, _ = get_fund_data_v2(code)
                 if hist_df is not None and not hist_df.empty:
                     
                     # -------------------------------------------------
@@ -765,7 +749,22 @@ def render_detail_page(code):
 
     # 获取数据
     with st.spinner("正在拉取最新数据..."):
-        df, rt_data, err = get_fund_data_v2(code)
+        # 1. 获取历史数据 (带缓存)
+        df, _, err = get_fund_data_v2(code)
+        
+        # 2. 获取实时数据 (无缓存，带重试)
+        rt_data = None
+        try:
+            # 复用概览页的获取函数，虽然是获取全量，但对于单次请求也尚可
+            # 这里的 get_all_fund_estimation 已经包含了重试机制
+            all_est_df = get_all_fund_estimation()
+            if all_est_df is not None and not all_est_df.empty:
+                # 尝试匹配
+                target = all_est_df[all_est_df["基金代码"] == code]
+                if not target.empty:
+                    rt_data = target.iloc[0].to_dict()
+        except Exception as e:
+            print(f"详情页实时数据获取失败: {e}")
 
     if err:
         st.error(f"❌ {err}")
@@ -795,7 +794,46 @@ def render_detail_page(code):
                 raw_rate = str(rt_data[k_rate]).replace("%", "")
                 curr_rate = f"{raw_rate}%"
             curr_date = "实时估算"
-        except:
+
+            # ---------------------------------------------------------
+            # 动态追加实时数据到 DataFrame 并重新计算布林带
+            # 这样图表和指标都会基于最新的实时估值
+            # ---------------------------------------------------------
+            last_date_in_df = pd.to_datetime(latest["date"]).date()
+            today_date = pd.Timestamp.now().date()
+            
+            if last_date_in_df < today_date and pd.notna(curr_val) and curr_val > 0:
+                # 构造新行
+                new_row = pd.DataFrame({
+                    "date": [pd.Timestamp.now()],
+                    "value": [curr_val],
+                    # 如果没有实时涨跌幅，尝试计算
+                    "日增长率": [float(raw_rate) if k_rate and raw_rate != "-" else None] 
+                })
+                
+                # 合并
+                temp_df = pd.concat([df, new_row], ignore_index=True)
+                
+                # 重新计算布林带 (N=20)
+                temp_df["MB"] = temp_df["value"].rolling(window=20).mean()
+                temp_df["STD"] = temp_df["value"].rolling(window=20).std()
+                temp_df["UB"] = temp_df["MB"] + 2 * temp_df["STD"]
+                temp_df["LB"] = temp_df["MB"] - 2 * temp_df["STD"]
+                
+                # 重新计算信号
+                def get_signal_local(row):
+                    if pd.isna(row['UB']) or pd.isna(row['LB']): return "数据不足"
+                    if row['value'] > row['UB']: return "卖出"
+                    elif row['value'] < row['LB']: return "买入"
+                    else: return "持有"
+                temp_df["信号"] = temp_df.apply(get_signal_local, axis=1)
+                
+                # 更新主 DataFrame 和 latest 引用
+                df = temp_df
+                latest = df.iloc[-1]
+                
+        except Exception as e:
+            # print(f"动态计算失败: {e}")
             pass
             
     # 如果实时没拿到涨幅，尝试用历史数据的"日增长率" (如果是今天的数据)
