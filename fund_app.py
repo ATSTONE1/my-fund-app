@@ -253,13 +253,10 @@ def plot_chart(df, days, title="布林带趋势分析", subtitle=None, enable_in
 # ==========================================
 # 4. 概览页逻辑
 # ==========================================
-# @st.cache_data(ttl=60) # 移除缓存，强制实时更新
+@st.cache_data(ttl=15) # 缓存15秒，解决服务器端因数据刷新导致选中状态丢失的问题
 def get_all_fund_estimation():
     """
-    获取所有基金的实时估值数据 (实时获取，无缓存)
-    增加了更严格的重试机制：
-    1. 捕获异常
-    2. 检查数据量 (如果少于 5000 条，认为数据残缺，触发重试)
+    获取所有基金的实时估值数据 (带短时缓存)
     """
     last_err = None
     for i in range(3):
@@ -692,15 +689,31 @@ def render_overview_page():
             use_container_width=True
         )
     else:
-        # 默认模式：点击即跳转
+        # 默认模式：选中行后显示按钮跳转
+        # 改为按钮触发，解决服务器端自动跳转不稳定的问题，同时也符合"点击进入详情改成按钮"的需求
         if selection and selection.selection and selection.selection.rows:
-            selected_idx = selection.selection.rows[0]
-            selected_code = final_df.iloc[selected_idx]["基金代码"]
-            st.session_state.selected_code = selected_code
-            st.session_state.page = "detail"
-            st.rerun()
+            try:
+                selected_idx = selection.selection.rows[0]
+                # 确保索引在范围内
+                if selected_idx < len(final_df):
+                    selected_code = final_df.iloc[selected_idx]["基金代码"]
+                    selected_name = final_df.iloc[selected_idx]["基金名称"]
+                    
+                    # 浮动提示或直接显示按钮
+                    # 使用 columns 让按钮居中或显眼
+                    st.success(f"已选中: **{selected_name} ({selected_code})**")
+                    
+                    # 这里的 key 需要动态，或者每次重置，防止状态干扰
+                    # 但为了简单，用固定 key 也可以，因为只会显示一个
+                    if st.button(f"👉 进入【{selected_name}】详情页", type="primary", use_container_width=True):
+                        st.session_state.selected_code = selected_code
+                        st.session_state.page = "detail"
+                        st.rerun()
+            except Exception as e:
+                st.error(f"选中处理出错: {e}")
             
         # 默认模式下也保留一个导出全部按钮，方便不切模式也能导
+        st.write("") # 增加一点间距
         csv = final_df.to_csv(index=False).encode('utf-8-sig')
         st.download_button(
             "📥 导出今日概览数据 (CSV)", 
