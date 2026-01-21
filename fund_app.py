@@ -16,11 +16,12 @@ st.set_page_config(
 # ==========================================
 # 2. 核心数据获取 (极简稳健版)
 # ==========================================
-# @st.cache_data(ttl=300) # 移除缓存，强制实时更新
-def get_fund_data_v2(code):
+@st.cache_data(ttl=14400) # 缓存4小时，因为历史净值一天只更新一次
+def get_fund_data_v2(code, fetch_realtime=True):
     """
     重写的获取函数，不搞复杂的猜测，只做标准处理。
     增加重试机制 (3次)
+    fetch_realtime: 是否获取实时估值 (概览页批量获取时可关闭以提速)
     """
     history_df = pd.DataFrame()
     realtime_data = None
@@ -36,9 +37,9 @@ def get_fund_data_v2(code):
                     return res
             except Exception as e:
                 last_err = e
-            import time
-            import random
-            time.sleep(random.uniform(1.0, 3.0)) # 增加等待时间，防止封禁
+            # import time
+            # import random
+            # time.sleep(random.uniform(1.0, 3.0)) # 移除延迟以加速
         raise last_err if last_err else Exception("获取数据为空")
 
     try:
@@ -114,15 +115,24 @@ def get_fund_data_v2(code):
         history_df = df
 
         # --- B. 获取实时估值 (可选) ---
-        try:
-            # 同样重试3次
-            est_df = fetch_with_retry(ak.fund_value_estimation_em)
-            # 找到对应代码的那一行
-            target = est_df[est_df["基金代码"] == code]
-            if not target.empty:
-                realtime_data = target.iloc[0].to_dict()
-        except Exception:
-            pass # 实时数据挂了不影响历史数据
+        if fetch_realtime:
+            # 针对特定基金的重试逻辑：如果没找到该基金，也视为失败并重试 (最多3次)
+            for _ in range(3):
+                try:
+                    # 获取全量估值数据
+                    est_df = ak.fund_value_estimation_em()
+                    if est_df is not None and not est_df.empty:
+                        target = est_df[est_df["基金代码"] == code]
+                        if not target.empty:
+                            realtime_data = target.iloc[0].to_dict()
+                            break # 成功获取到特定基金数据，退出循环
+                except Exception:
+                    pass
+                
+                # 简单回退，避免过于频繁请求
+                import time
+                import random
+                time.sleep(random.uniform(0.5, 1.5))
 
     except Exception as e:
         error_msg = f"发生未预期的错误: {str(e)}"
@@ -290,6 +300,15 @@ def get_all_fund_estimation():
         print(f"实时估值获取失败: {last_err}")
     return None
 
+@st.cache_data(ttl=86400) # 缓存1天，基金名称变动不大
+def get_all_fund_names():
+    """获取所有基金代码和名称的映射表"""
+    try:
+        df = ak.fund_name_em()
+        return df[["基金代码", "基金简称"]]
+    except Exception:
+        return None
+
 def render_overview_page():
     # 标题栏 + 刷新按钮
     c1, c2 = st.columns([6, 1])
@@ -343,6 +362,35 @@ def render_overview_page():
     # 获取全量数据并筛选
     with st.spinner("正在获取实时行情和计算指标 (已开启3次重试机制)..."):
         all_est_df = get_all_fund_estimation()
+
+        # 如果获取到了实时数据，先进行列名标准化，以便后续提取估值
+        est_map = {} # code -> float value
+        if all_est_df is not None and not all_est_df.empty:
+             # 处理列名动态变化的问题
+            col_mapping = {}
+            for c in all_est_df.columns:
+                if "估算值" in c and "估算数据" in c:
+                    col_mapping[c] = "估算值"
+                elif "估算增长率" in c and "估算数据" in c:
+                    col_mapping[c] = "估算增长率"
+                elif "单位净值" in c and "公布数据" in c:
+                    col_mapping[c] = "单位净值"
+                elif "日增长率" in c and "公布数据" in c:
+                    col_mapping[c] = "日增长率"
+                elif "估算时间" in c:
+                    col_mapping[c] = "估算时间"
+            
+            # 临时重命名以便提取
+            temp_df = all_est_df.rename(columns=col_mapping)
+            # 构建映射字典 (排除无效值)
+            for _, row in temp_df.iterrows():
+                code = str(row["基金代码"])
+                val = row.get("估算值")
+                if pd.notna(val) and val != "" and val != "-":
+                    try:
+                        est_map[code] = float(val)
+                    except:
+                        pass
         
         # 预先计算指标 (UB, LB, 信号)
         # 使用并行计算加速历史数据获取
@@ -351,11 +399,11 @@ def render_overview_page():
         stats_list = []
         progress_bar = st.progress(0)
         
-        def fetch_single_fund_stats(code):
-            # 增加随机延迟，模拟人类行为
-            import time
-            import random
-            time.sleep(random.uniform(0.1, 1.0))
+        def fetch_single_fund_stats(code, current_est=None):
+            # 移除人为延迟，加速加载
+            # import time
+            # import random
+            # time.sleep(random.uniform(0.1, 1.0))
             
             # 默认值
             stats = {
@@ -368,13 +416,66 @@ def render_overview_page():
             }
             try:
                 # 获取历史数据 (已移除缓存，强制重试)
-                hist_df, _, _ = get_fund_data_v2(code)
+                # 概览页不需要在此处获取实时数据，因为外部已经批量获取了，设为 False 以加速
+                hist_df, _, _ = get_fund_data_v2(code, fetch_realtime=False)
                 if hist_df is not None and not hist_df.empty:
+                    
+                    # -------------------------------------------------
+                    # 动态更新 UB/LB 逻辑 (响应用户需求：实时估值参与计算)
+                    # -------------------------------------------------
+                    if current_est is not None:
+                        # 检查最后一条日期是否是今天 (避免重复添加)
+                        last_date = pd.to_datetime(hist_df.iloc[-1]["date"]).date()
+                        today = pd.Timestamp.now().date()
+                        
+                        if last_date < today:
+                            # 如果历史数据还没更新到今天，且有实时估值
+                            # 临时追加一行今天的数据进行计算
+                            new_row = pd.DataFrame({
+                                "date": [today],
+                                "value": [current_est]
+                            })
+                            # 为了计算准确，只需要追加并计算最后几行即可
+                            # 但为了保险，还是拼接到最后，然后重新 rolling
+                            # 这里的 hist_df 可能只有 value 列是必须的
+                            temp_df = pd.concat([hist_df, new_row], ignore_index=True)
+                            
+                            # 重新计算布林带 (N=20)
+                            temp_df["MB"] = temp_df["value"].rolling(window=20).mean()
+                            temp_df["STD"] = temp_df["value"].rolling(window=20).std()
+                            temp_df["UB"] = temp_df["MB"] + 2 * temp_df["STD"]
+                            temp_df["LB"] = temp_df["MB"] - 2 * temp_df["STD"]
+                            
+                            # 使用重新计算后的 DataFrame
+                            hist_df = temp_df
+
                     # 获取 UB/LB
                     if "UB" in hist_df.columns:
                         latest = hist_df.iloc[-1]
-                        stats["UB"] = latest["UB"]
-                        stats["LB"] = latest["LB"]
+                        ub_val = latest["UB"]
+                        lb_val = latest["LB"]
+                        
+                        # 计算当前价格 (优先用实时估值，否则用历史收盘)
+                        curr_val = current_est if current_est is not None else latest["value"]
+                        
+                        # 格式化 UB/LB，增加百分比差距显示
+                        # 格式：1.2345 (+5.2%)
+                        if pd.notna(ub_val) and pd.notna(curr_val) and curr_val != 0:
+                            diff_ub = (ub_val - curr_val) / curr_val * 100
+                            stats["UB"] = f"{ub_val:.4f} ({diff_ub:+.2f}%)"
+                        else:
+                            stats["UB"] = f"{ub_val:.4f}" if pd.notna(ub_val) else None
+                            
+                        if pd.notna(lb_val) and pd.notna(curr_val) and curr_val != 0:
+                            diff_lb = (lb_val - curr_val) / curr_val * 100
+                            stats["LB"] = f"{lb_val:.4f} ({diff_lb:+.2f}%)"
+                        else:
+                            stats["LB"] = f"{lb_val:.4f}" if pd.notna(lb_val) else None
+                            
+                        # 保留原始数值用于后续信号判断 (去掉百分比字符串)
+                        stats["UB_raw"] = ub_val
+                        stats["LB_raw"] = lb_val
+
                     
                     # 获取昨日涨跌幅 (兜底用)
                     if "日增长率" in hist_df.columns:
@@ -387,10 +488,11 @@ def render_overview_page():
                 pass
             return stats
 
-        # 使用线程池并发请求 (最大5个线程 - 降低并发以防封IP)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        # 使用线程池并发请求 (提高并发数至20)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
             # 提交所有任务
-            future_to_code = {executor.submit(fetch_single_fund_stats, code): code for code in codes}
+            # 将实时估值传入
+            future_to_code = {executor.submit(fetch_single_fund_stats, code, est_map.get(code)): code for code in codes}
             
             # 处理结果
             for i, future in enumerate(concurrent.futures.as_completed(future_to_code)):
@@ -413,6 +515,7 @@ def render_overview_page():
     input_df = pd.DataFrame({"基金代码": codes})
     
     # 处理列名动态变化的问题 (比如 '2026-01-19-估算数据-估算值')
+    # 注意：前面可能已经处理过一次 map，但为了保险起见，这里再做一次完整清洗
     col_mapping = {}
     for c in all_est_df.columns:
         if "估算值" in c and "估算数据" in c:
@@ -440,6 +543,25 @@ def render_overview_page():
     
     # 如果没匹配到，填充默认值
     final_df["基金名称"] = final_df["基金名称"].fillna("未知/无实时数据")
+    
+    # 尝试补全未知名称
+    # 检查是否有未知名称
+    unknown_mask = final_df["基金名称"] == "未知/无实时数据"
+    if unknown_mask.any():
+        # 只有当确实有未知名称时，才去加载全量名称表
+        name_df = get_all_fund_names()
+        if name_df is not None:
+            # 转换为字典
+            name_map = dict(zip(name_df["基金代码"], name_df["基金简称"]))
+            
+            # 补全逻辑
+            def fix_name(row):
+                if row["基金名称"] == "未知/无实时数据":
+                    return name_map.get(row["基金代码"], "未知基金")
+                return row["基金名称"]
+            
+            final_df["基金名称"] = final_df.apply(fix_name, axis=1)
+
     # 不要过早 fillna("-")，因为还需要计算
     
     # 计算最终信号 (实时值 vs UB/LB)
@@ -460,8 +582,9 @@ def render_overview_page():
                 return "数据不足"
                 
             val = float(curr_val)
-            ub = float(row["UB"])
-            lb = float(row["LB"])
+            # 使用原始数值进行比较
+            ub = float(row.get("UB_raw", row["UB"])) # 兼容旧逻辑
+            lb = float(row.get("LB_raw", row["LB"]))
             
             if pd.isna(ub) or pd.isna(lb):
                 return "数据不足"
@@ -557,8 +680,8 @@ def render_overview_page():
             "建议": st.column_config.TextColumn("操作建议"),
             "估算增长率": st.column_config.TextColumn("估算涨幅"),
             "估算值": st.column_config.TextColumn("实时/最新净值"), # 改为TextColumn以支持"(昨日)"后缀
-            "UB": st.column_config.NumberColumn("阻力位(UB)", format="%.4f"),
-            "LB": st.column_config.NumberColumn("支撑位(LB)", format="%.4f"),
+            "UB": st.column_config.TextColumn("上轨阻力位 (距当前%)"), # 改为Text以支持百分比显示
+            "LB": st.column_config.TextColumn("下轨支撑位 (距当前%)"), # 改为Text以支持百分比显示
         }
     )
     
@@ -712,8 +835,20 @@ def render_detail_page(code):
     # 涨跌幅颜色逻辑: 涨红(inverse) 跌绿(inverse)
     c1.metric("当前净值/估值", f"{curr_val:.4f}", curr_rate, delta_color="inverse")
     c2.metric("更新时间", curr_date)
-    c3.metric("布林上轨 (阻力)", f"{ub:.4f}" if ub else "-")
-    c4.metric("布林下轨 (支撑)", f"{lb:.4f}" if lb else "-")
+    
+    # 计算距离百分比
+    ub_delta = None
+    if ub and pd.notna(ub) and curr_val and curr_val != 0:
+         diff = (ub - curr_val) / curr_val * 100
+         ub_delta = f"{diff:+.2f}%"
+         
+    lb_delta = None
+    if lb and pd.notna(lb) and curr_val and curr_val != 0:
+         diff = (lb - curr_val) / curr_val * 100
+         lb_delta = f"{diff:+.2f}%"
+
+    c3.metric("布林上轨 (阻力)", f"{ub:.4f}" if ub and pd.notna(ub) else "-", ub_delta, delta_color="off")
+    c4.metric("布林下轨 (支撑)", f"{lb:.4f}" if lb and pd.notna(lb) else "-", lb_delta, delta_color="off")
 
     # 指标栏 - 第二行 (进阶分析)
     st.markdown("---") 
