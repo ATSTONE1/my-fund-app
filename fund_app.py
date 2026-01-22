@@ -3,6 +3,10 @@ import akshare as ak
 import pandas as pd
 import altair as alt
 from datetime import datetime
+import requests
+import re
+import json
+import time
 
 # ==========================================
 # 1. 页面配置
@@ -253,10 +257,13 @@ def plot_chart(df, days, title="布林带趋势分析", subtitle=None, enable_in
 # ==========================================
 # 4. 概览页逻辑
 # ==========================================
-@st.cache_data(ttl=15) # 缓存15秒，解决服务器端因数据刷新导致选中状态丢失的问题
+# @st.cache_data(ttl=15) # 已移除缓存，强制实时更新
 def get_all_fund_estimation():
     """
-    获取所有基金的实时估值数据 (带短时缓存)
+    获取所有基金的实时估值数据 (实时获取，无缓存)
+    增加了更严格的重试机制：
+    1. 捕获异常
+    2. 检查数据量 (如果少于 5000 条，认为数据残缺，触发重试)
     """
     last_err = None
     for i in range(3):
@@ -279,6 +286,39 @@ def get_all_fund_estimation():
     # 如果3次都失败，记录日志或做点什么（这里返回None，由外层处理）
     if last_err:
         print(f"实时估值获取失败: {last_err}")
+    return None
+
+def get_realtime_fund_one(code):
+    """
+    获取单只基金的实时估值 (极速版，不依赖全量接口)
+    接口: http://fundgz.1234567.com.cn/js/{code}.js
+    """
+    url = f"http://fundgz.1234567.com.cn/js/{code}.js?rt={int(time.time()*1000)}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    for i in range(3): # 3次重试
+        try:
+            resp = requests.get(url, headers=headers, timeout=3)
+            if resp.status_code == 200:
+                text = resp.text
+                if text.startswith("jsonpgz("):
+                    # 解析 jsonp
+                    content = re.search(r'jsonpgz\((.*)\);', text)
+                    if content:
+                        data = json.loads(content.group(1))
+                        # 统一字段名以匹配之前的逻辑
+                        # 注意：接口返回的 gszzl 是不带 % 的数字，如 "0.09"
+                        return {
+                            "基金代码": data['fundcode'],
+                            "基金名称": data['name'],
+                            "估算值": data['gsz'],
+                            "估算增长率": data['gszzl'] + "%", 
+                            "估算时间": data['gztime'],
+                            "单位净值": data['dwjz'] # 昨日净值
+                        }
+        except Exception as e:
+            time.sleep(0.5)
     return None
 
 @st.cache_data(ttl=86400) # 缓存1天，基金名称变动不大
@@ -768,14 +808,17 @@ def render_detail_page(code):
         # 2. 获取实时数据 (无缓存，带重试)
         rt_data = None
         try:
-            # 复用概览页的获取函数，虽然是获取全量，但对于单次请求也尚可
-            # 这里的 get_all_fund_estimation 已经包含了重试机制
-            all_est_df = get_all_fund_estimation()
-            if all_est_df is not None and not all_est_df.empty:
-                # 尝试匹配
-                target = all_est_df[all_est_df["基金代码"] == code]
-                if not target.empty:
-                    rt_data = target.iloc[0].to_dict()
+            # 优先使用单只基金极速接口 (更稳定，更适合详情页)
+            rt_data = get_realtime_fund_one(code)
+            
+            # 如果单只接口失败，再尝试复用全量接口 (兜底)
+            if not rt_data:
+                all_est_df = get_all_fund_estimation()
+                if all_est_df is not None and not all_est_df.empty:
+                    # 尝试匹配
+                    target = all_est_df[all_est_df["基金代码"] == code]
+                    if not target.empty:
+                        rt_data = target.iloc[0].to_dict()
         except Exception as e:
             print(f"详情页实时数据获取失败: {e}")
 
