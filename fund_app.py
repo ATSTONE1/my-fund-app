@@ -7,6 +7,7 @@ import requests
 import re
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==========================================
 # 1. 页面配置
@@ -321,6 +322,28 @@ def get_realtime_fund_one(code):
             time.sleep(0.5)
     return None
 
+def get_batch_realtime_estimation(codes):
+    """
+    批量获取基金实时估值 (并发版，替代全量接口)
+    """
+    results = []
+    # 这里的 max_workers 可以设大一点，因为主要是网络IO
+    with ThreadPoolExecutor(max_workers=20) as executor: 
+        future_to_code = {executor.submit(get_realtime_fund_one, code): code for code in codes}
+        for future in as_completed(future_to_code):
+            try:
+                data = future.result()
+                if data:
+                    results.append(data)
+            except Exception:
+                pass
+    
+    if not results:
+        # 返回空 DataFrame，保持列名一致
+        return pd.DataFrame(columns=["基金代码", "基金名称", "估算值", "估算增长率", "估算时间", "单位净值"])
+        
+    return pd.DataFrame(results)
+
 @st.cache_data(ttl=86400) # 缓存1天，基金名称变动不大
 def get_all_fund_names():
     """获取所有基金代码和名称的映射表"""
@@ -381,30 +404,15 @@ def render_overview_page():
         """)
 
     # 获取全量数据并筛选
-    with st.spinner("正在获取实时行情和计算指标 (已开启3次重试机制)..."):
-        all_est_df = get_all_fund_estimation()
+    with st.spinner("正在获取实时行情和计算指标..."):
+        # 使用并发接口替代全量接口
+        all_est_df = get_batch_realtime_estimation(codes)
 
-        # 如果获取到了实时数据，先进行列名标准化，以便后续提取估值
+        # 如果获取到了实时数据，构建映射字典
         est_map = {} # code -> float value
         if all_est_df is not None and not all_est_df.empty:
-             # 处理列名动态变化的问题
-            col_mapping = {}
-            for c in all_est_df.columns:
-                if "估算值" in c and "估算数据" in c:
-                    col_mapping[c] = "估算值"
-                elif "估算增长率" in c and "估算数据" in c:
-                    col_mapping[c] = "估算增长率"
-                elif "单位净值" in c and "公布数据" in c:
-                    col_mapping[c] = "单位净值"
-                elif "日增长率" in c and "公布数据" in c:
-                    col_mapping[c] = "日增长率"
-                elif "估算时间" in c:
-                    col_mapping[c] = "估算时间"
-            
-            # 临时重命名以便提取
-            temp_df = all_est_df.rename(columns=col_mapping)
-            # 构建映射字典 (排除无效值)
-            for _, row in temp_df.iterrows():
+            # 直接使用标准化后的列名
+            for _, row in all_est_df.iterrows():
                 code = str(row["基金代码"])
                 val = row.get("估算值")
                 if pd.notna(val) and val != "" and val != "-":
@@ -534,24 +542,6 @@ def render_overview_page():
     # 筛选
     # 构造基础 DataFrame，确保所有输入代码都在列表中
     input_df = pd.DataFrame({"基金代码": codes})
-    
-    # 处理列名动态变化的问题 (比如 '2026-01-19-估算数据-估算值')
-    # 注意：前面可能已经处理过一次 map，但为了保险起见，这里再做一次完整清洗
-    col_mapping = {}
-    for c in all_est_df.columns:
-        if "估算值" in c and "估算数据" in c:
-            col_mapping[c] = "估算值"
-        elif "估算增长率" in c and "估算数据" in c:
-            col_mapping[c] = "估算增长率"
-        elif "单位净值" in c and "公布数据" in c:
-            col_mapping[c] = "单位净值"
-        elif "日增长率" in c and "公布数据" in c:
-            col_mapping[c] = "日增长率"
-        elif "估算时间" in c:
-            col_mapping[c] = "估算时间"
-            
-    # 重命名列
-    all_est_df = all_est_df.rename(columns=col_mapping)
     
     # 左连接，保留所有输入代码
     all_est_df["基金代码"] = all_est_df["基金代码"].astype(str)
